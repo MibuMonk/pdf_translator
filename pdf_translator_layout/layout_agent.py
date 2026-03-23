@@ -407,12 +407,46 @@ def render_page(
 
     image_obstacles = [fitz.Rect(b) for b in page_data.get("image_obstacles", [])]
 
+    # Fetch drawings once — reused in Step 1 (REQ-1) and Step 7+8 (topology)
+    drawings = page.get_drawings()
+
+    # Pre-build list of filled-drawing rects for background overlap check (REQ-1)
+    filled_drawing_rects = [
+        fitz.Rect(d["rect"])
+        for d in drawings
+        if d.get("fill") is not None and d.get("rect") is not None
+    ]
+
+    def _has_background_overlap(rect: fitz.Rect, threshold: float = 0.30) -> bool:
+        """Return True if rect overlaps > threshold fraction with background elements."""
+        rect_area = rect.width * rect.height
+        if rect_area <= 0:
+            return False
+        for bg_rect in filled_drawing_rects:
+            inter = rect & bg_rect  # intersection
+            if inter.is_empty:
+                continue
+            if (inter.width * inter.height) / rect_area > threshold:
+                return True
+        for obs in image_obstacles:
+            inter = rect & obs
+            if inter.is_empty:
+                continue
+            if (inter.width * inter.height) / rect_area > threshold:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Step 1: Redact
     # ------------------------------------------------------------------
     for block in blocks:
         for rb in block.get("redact_bboxes", []):
-            page.add_redact_annot(fitz.Rect(rb))
+            r = fitz.Rect(rb)
+            if _has_background_overlap(r):
+                # Transparent fill: removes text but preserves background (REQ-1)
+                page.add_redact_annot(r, fill=None)
+            else:
+                page.add_redact_annot(r)
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
     # ------------------------------------------------------------------
@@ -515,11 +549,40 @@ def render_page(
             plan_page = None  # trigger fallback below
 
     if plan_page is None:
-        drawings = page.get_drawings()
+        # `drawings` was already fetched before Step 1 (REQ-1)
         topo_result = TopologyAnalyzer(page_rect).analyze(
             bboxes, aligns, drawings, image_obstacles
         )
         insert_bboxes = topo_result.insert_bboxes
+
+    # ------------------------------------------------------------------
+    # REQ-2: Table cell detection — cap insert_bbox to original block bbox
+    # ------------------------------------------------------------------
+    # A block is a table cell if it has a horizontal neighbor:
+    #   abs(other_y0 - this_y0) <= 8px  AND  abs(other_x0 - this_x0) > 60px
+    orig_bboxes = [fitz.Rect(b["bbox"]) for b in blocks]
+    table_cell_mask = [False] * len(bboxes)
+    for i in range(len(bboxes)):
+        bi = orig_bboxes[i] if i < len(orig_bboxes) else bboxes[i]
+        for j in range(len(bboxes)):
+            if i == j:
+                continue
+            bj = orig_bboxes[j] if j < len(orig_bboxes) else bboxes[j]
+            if (
+                abs(bj.y0 - bi.y0) <= 8
+                and abs(bj.x0 - bi.x0) > 60
+            ):
+                table_cell_mask[i] = True
+                break
+
+    # Cap insert_bbox to original block bbox for table cells
+    capped_insert_bboxes = []
+    for i, ibbox in enumerate(insert_bboxes):
+        if table_cell_mask[i] and i < len(orig_bboxes):
+            capped_insert_bboxes.append(orig_bboxes[i])
+        else:
+            capped_insert_bboxes.append(ibbox)
+    insert_bboxes = capped_insert_bboxes
 
     # ------------------------------------------------------------------
     # Step 9: Phase 2 — compute fitting_sizes via VisualOptimizer
@@ -537,11 +600,68 @@ def render_page(
     render_sizes = visual.consistency_map(fitting_sizes, source_sizes, title_mask)
 
     # ------------------------------------------------------------------
+    # REQ-3: Parallel sibling font-size normalization
+    # ------------------------------------------------------------------
+    # Detect vertical column siblings (same x0 ±15px) and horizontal row
+    # siblings (same y0 ±6px).  Within each group of 2+, set all render
+    # sizes to min(render_sizes_in_group).  Font sizes only — no colors.
+    _X0_TOL = 15.0  # tolerance for vertical column siblings
+    _Y0_TOL = 6.0   # tolerance for horizontal row siblings
+    n_blocks = len(render_sizes)
+
+    def _apply_sibling_min(groups_of_indices: list) -> None:
+        """Set all render_sizes in each group to the group's minimum."""
+        for group in groups_of_indices:
+            if len(group) >= 2:
+                min_size = min(render_sizes[i] for i in group)
+                for i in group:
+                    render_sizes[i] = min_size
+
+    # Build column sibling groups (shared x0 ±15px)
+    col_visited = [False] * n_blocks
+    col_groups = []
+    for i in range(n_blocks):
+        if col_visited[i]:
+            continue
+        group = [i]
+        xi = insert_bboxes[i].x0
+        for j in range(i + 1, n_blocks):
+            if not col_visited[j] and abs(insert_bboxes[j].x0 - xi) <= _X0_TOL:
+                group.append(j)
+        if len(group) >= 2:
+            col_groups.append(group)
+            for idx in group:
+                col_visited[idx] = True
+
+    # Build row sibling groups (shared y0 ±6px)
+    row_visited = [False] * n_blocks
+    row_groups = []
+    for i in range(n_blocks):
+        if row_visited[i]:
+            continue
+        group = [i]
+        yi = insert_bboxes[i].y0
+        for j in range(i + 1, n_blocks):
+            if not row_visited[j] and abs(insert_bboxes[j].y0 - yi) <= _Y0_TOL:
+                group.append(j)
+        if len(group) >= 2:
+            row_groups.append(group)
+            for idx in group:
+                row_visited[idx] = True
+
+    render_sizes = list(render_sizes)  # ensure mutable list
+    _apply_sibling_min(col_groups)
+    _apply_sibling_min(row_groups)
+
+    # ------------------------------------------------------------------
     # Step 11: Phase 3 — render
     # ------------------------------------------------------------------
     for idx, (ibbox, text, rs, align) in enumerate(
         zip(insert_bboxes, translated_texts, render_sizes, aligns)
     ):
+        # REQ-2: fall back to original block text if preprocessed text is blank
+        if not text.strip() and idx < len(blocks):
+            text = blocks[idx].get("text", text)
         src_color = source_colors[idx] if idx < len(source_colors) else (0.0, 0.0, 0.0)
         color = visual.adjust_color(src_color)
         insert_text_fitting(

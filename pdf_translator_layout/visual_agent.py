@@ -142,6 +142,10 @@ class VisualOptimizer:
         Apply 80th-percentile cap per base_size group.
         Returns render_sizes[i] = min(fitting_sizes[i], cap[base_sizes[i]]).
         Title blocks (title_mask[i]=True) are uncapped.
+
+        REQ-4: Compute global_body_cap from all non-title fitting sizes (when
+        there are >= 3 non-title blocks) and apply it to small non-title groups
+        (< 3 members) to prevent isolated body blocks from rendering at title scale.
         """
         n = len(fitting_sizes)
 
@@ -152,11 +156,24 @@ class VisualOptimizer:
                 key = base_sizes[i]
                 groups.setdefault(key, []).append(i)
 
+        # REQ-4: Compute global_body_cap from all non-title fitting sizes
+        non_title_indices = [i for i in range(n) if not title_mask[i]]
+        if len(non_title_indices) >= 3:
+            global_body_cap: Optional[float] = max(
+                fitting_sizes[i] for i in non_title_indices
+            )
+        else:
+            global_body_cap = None
+
         # Compute cap per base_size
         cap: dict = {}
         for base_size, indices in groups.items():
             if len(indices) < 3:
-                cap[base_size] = base_size
+                # REQ-4: small group → cap at min(base_size, global_body_cap)
+                if global_body_cap is not None:
+                    cap[base_size] = min(base_size, global_body_cap)
+                else:
+                    cap[base_size] = base_size
             else:
                 sorted_desc = sorted(
                     [fitting_sizes[i] for i in indices], reverse=True
