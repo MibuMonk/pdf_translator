@@ -577,6 +577,7 @@ def main() -> None:
     parser.add_argument("--font", default=None, help="CJK font file path")
     parser.add_argument("--pages", default=None, help='Page spec, e.g. "1,3,5-8"')
     parser.add_argument("--plan", default=None, help="layout_plan.json from space_planner (optional)")
+    parser.add_argument("--tgt", default="ja", help="Target language code (default: ja)")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -627,9 +628,58 @@ def main() -> None:
         requested_pages = {int(k) for k in page_map.keys()}
 
     # Discover CJK font
-    cjk_font = find_cjk_font("ja", hint=args.font)
+    cjk_font = find_cjk_font(args.tgt, hint=args.font)
     if cjk_font:
         print(f"[INFO] Using CJK font: {cjk_font}", file=sys.stderr)
+        # Self-check: verify glyph coverage against actual translated text
+        all_translated = " ".join(
+            b.get("translated", "")
+            for p in pages_list
+            for b in p.get("blocks", [])
+        )
+        unique_chars = set(all_translated) - set(" \n\t")
+        try:
+            fnt = fitz.Font(fontfile=cjk_font)
+            missing_chars = [ch for ch in unique_chars if not fnt.has_glyph(ord(ch))]
+            if missing_chars:
+                pct = len(missing_chars) / len(unique_chars) * 100
+                print(
+                    f"[WARN] Font missing {len(missing_chars)}/{len(unique_chars)} "
+                    f"unique chars ({pct:.1f}%): {''.join(sorted(missing_chars)[:20])}",
+                    file=sys.stderr,
+                )
+                # Try to find a better font
+                better = find_cjk_font(args.tgt + "-fallback", hint=None)
+                # Re-scan with a wider net: prefer fonts with fewer missing glyphs
+                best_font, best_missing = cjk_font, len(missing_chars)
+                for root in ["/System/Library/Fonts", "/Library/Fonts",
+                             os.path.expanduser("~/Library/Fonts")]:
+                    if not os.path.isdir(root):
+                        continue
+                    for dirpath, _, filenames in os.walk(root):
+                        for fn in filenames:
+                            if not fn.lower().endswith((".ttf", ".ttc", ".otf")):
+                                continue
+                            fp = os.path.join(dirpath, fn)
+                            try:
+                                f2 = fitz.Font(fontfile=fp)
+                                m = sum(1 for ch in unique_chars if not f2.has_glyph(ord(ch)))
+                                if m < best_missing:
+                                    best_missing = m
+                                    best_font = fp
+                            except Exception:
+                                pass
+                if best_font != cjk_font:
+                    print(
+                        f"[INFO] Switching to better font: {best_font} "
+                        f"(missing {best_missing}/{len(unique_chars)})",
+                        file=sys.stderr,
+                    )
+                    cjk_font = best_font
+            else:
+                print(f"[INFO] Font coverage: all {len(unique_chars)} unique chars present.", file=sys.stderr)
+        except Exception as exc:
+            print(f"[WARN] Could not check font coverage: {exc}", file=sys.stderr)
     else:
         print("[WARN] No CJK font found; CJK text may not render correctly.", file=sys.stderr)
 

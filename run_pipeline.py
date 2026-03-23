@@ -216,6 +216,7 @@ def main():
         "--json",   str(translated_json),
         "--output", str(output_pdf),
     ]
+    layout_cmd += ["--tgt", args.tgt]
     if args.font:
         layout_cmd += ["--font", args.font]
     if args.pages:
