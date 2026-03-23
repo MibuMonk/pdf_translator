@@ -396,6 +396,7 @@ def render_page(
     fontfile: Optional[str],
     cjk_font: Optional[str],
     page_rect: fitz.Rect,
+    plan_page: Optional[dict] = None,
 ) -> None:
     """Redact and re-render one page."""
     blocks = page_data.get("blocks", [])
@@ -421,49 +422,57 @@ def render_page(
     aligns = [int(b.get("align", 0)) for b in blocks]  # 0=left,1=center,2=right
 
     # ------------------------------------------------------------------
-    # Step 3: Adjacent merge
+    # Step 3: Adjacent merge (skipped when plan is provided — consolidator
+    # already handled fragmentation; plan's block count must stay in sync)
     # ------------------------------------------------------------------
-    translated_texts, bboxes, source_sizes = _merge_adjacent_blocks(
-        translated_texts, bboxes, source_sizes
-    )
-    # Re-derive aligns after merge (use first block's align; indices may shift)
-    # We rebuild from scratch using the merged bboxes
-    new_aligns = []
-    for i, bbox in enumerate(bboxes):
-        # Find original block with closest matching bbox
-        best_align = 0
-        best_dist = float("inf")
-        for orig_b, orig_a in zip([fitz.Rect(b["bbox"]) for b in blocks], aligns if len(aligns) == len(blocks) else [0]*len(blocks)):
-            d = abs(orig_b.x0 - bbox.x0) + abs(orig_b.y0 - bbox.y0)
-            if d < best_dist:
-                best_dist = d
-                best_align = orig_a
-        new_aligns.append(best_align)
-    aligns = new_aligns
+    if plan_page is None:
+        translated_texts, bboxes, source_sizes = _merge_adjacent_blocks(
+            translated_texts, bboxes, source_sizes
+        )
+        # Re-derive aligns after merge
+        new_aligns = []
+        for i, bbox in enumerate(bboxes):
+            best_align = 0
+            best_dist = float("inf")
+            for orig_b, orig_a in zip([fitz.Rect(b["bbox"]) for b in blocks],
+                                      aligns if len(aligns) == len(blocks) else [0]*len(blocks)):
+                d = abs(orig_b.x0 - bbox.x0) + abs(orig_b.y0 - bbox.y0)
+                if d < best_dist:
+                    best_dist = d
+                    best_align = orig_a
+            new_aligns.append(best_align)
+        aligns = new_aligns
 
     # ------------------------------------------------------------------
-    # Step 4: Title detection
+    # Step 4: Title detection — use plan when available
     # ------------------------------------------------------------------
-    max_fs = max(source_sizes) if source_sizes else 10.0
-    title_threshold = max_fs * 0.85
-    page_h = page_rect.height
-    title_indices: set[int] = set()
-    for idx, (fs, bbox) in enumerate(zip(source_sizes, bboxes)):
-        is_large = fs >= title_threshold and fs >= 16.0
-        in_top = bbox.y0 < page_h * 0.25
-        very_large = fs >= 40.0
-        if is_large and (in_top or very_large):
-            title_indices.add(idx)
+    if plan_page is not None:
+        title_indices: set[int] = set(plan_page.get("title_indices", []))
+    else:
+        max_fs = max(source_sizes) if source_sizes else 10.0
+        title_threshold = max_fs * 0.85
+        page_h = page_rect.height
+        title_indices = set()
+        for idx, (fs, bbox) in enumerate(zip(source_sizes, bboxes)):
+            is_large = fs >= title_threshold and fs >= 16.0
+            in_top = bbox.y0 < page_h * 0.25
+            very_large = fs >= 40.0
+            if is_large and (in_top or very_large):
+                title_indices.add(idx)
 
     # ------------------------------------------------------------------
-    # Step 5: Snap y0 by clustering
+    # Step 5: Snap y0 — use plan's precomputed snap_map if available
     # ------------------------------------------------------------------
-    y0_vals = [b.y0 for b in bboxes]
-    clusters = _cluster(y0_vals, tol=3.0, min_count=2)
-    snap_map: dict[float, float] = {}
-    for rep, members in clusters.items():
-        for v in members:
-            snap_map[v] = rep
+    if plan_page is not None:
+        raw_snap = plan_page.get("snap_map", {})
+        snap_map: dict[float, float] = {float(k): float(v) for k, v in raw_snap.items()}
+    else:
+        y0_vals = [b.y0 for b in bboxes]
+        clusters = _cluster(y0_vals, tol=3.0, min_count=2)
+        snap_map = {}
+        for rep, members in clusters.items():
+            for v in members:
+                snap_map[v] = rep
 
     snapped_bboxes = []
     for b in bboxes:
@@ -484,14 +493,26 @@ def render_page(
     fn = font_name or "helv"
 
     # ------------------------------------------------------------------
-    # Step 7+8: Topology analysis — Voronoi cells + insert_bboxes
+    # Step 7+8: Topology analysis — use precomputed plan when available
     # ------------------------------------------------------------------
-    drawings = page.get_drawings()
-    topo_result = TopologyAnalyzer(page_rect).analyze(
-        bboxes, aligns, drawings, image_obstacles
-    )
-    cells = topo_result.cells
-    insert_bboxes = topo_result.insert_bboxes
+    if plan_page is not None:
+        plan_cells = plan_page.get("cells", [])
+        insert_bboxes = [fitz.Rect(c["insert_bbox"]) for c in plan_cells]
+        # Align count: if plan and block lists diverge (shouldn't happen), fall back
+        if len(insert_bboxes) != len(bboxes):
+            print(
+                f"[WARN] plan cell count ({len(insert_bboxes)}) != block count ({len(bboxes)}); "
+                "falling back to live topology",
+                file=sys.stderr,
+            )
+            plan_page = None  # trigger fallback below
+
+    if plan_page is None:
+        drawings = page.get_drawings()
+        topo_result = TopologyAnalyzer(page_rect).analyze(
+            bboxes, aligns, drawings, image_obstacles
+        )
+        insert_bboxes = topo_result.insert_bboxes
 
     # ------------------------------------------------------------------
     # Step 9: Phase 2 — compute fitting_sizes via VisualOptimizer
@@ -555,6 +576,7 @@ def main() -> None:
     parser.add_argument("--output", default=None, help="Output PDF path (default: <stem>.ja.pdf)")
     parser.add_argument("--font", default=None, help="CJK font file path")
     parser.add_argument("--pages", default=None, help='Page spec, e.g. "1,3,5-8"')
+    parser.add_argument("--plan", default=None, help="layout_plan.json from space_planner (optional)")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -570,6 +592,19 @@ def main() -> None:
     output_path = Path(args.output) if args.output else input_path.with_suffix("").with_name(
         input_path.stem + ".ja.pdf"
     )
+
+    # Load layout plan (optional)
+    plan_map: dict[str, dict] = {}
+    if args.plan:
+        plan_path = Path(args.plan)
+        if plan_path.exists():
+            with open(plan_path, encoding="utf-8") as f:
+                plan_data = json.load(f)
+            for pp in plan_data.get("pages", []):
+                plan_map[str(pp["page_num"])] = pp
+            print(f"[INFO] Loaded layout plan: {plan_path} ({len(plan_map)} pages)", file=sys.stderr)
+        else:
+            print(f"[WARN] --plan file not found: {plan_path}", file=sys.stderr)
 
     # Load JSON
     with open(json_path, encoding="utf-8") as f:
@@ -625,6 +660,7 @@ def main() -> None:
             fontfile=cjk_font,
             cjk_font=cjk_font,
             page_rect=page_rect,
+            plan_page=plan_map.get(key),
         )
 
     doc.save(str(output_path), garbage=4, deflate=True)
