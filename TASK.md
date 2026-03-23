@@ -1,20 +1,36 @@
-# Translate Agent
+# QA Agent
 
 ## 職責
-parsed.json の各ブロックの text フィールドを翻訳し、translated フィールドを追加した
-translated.json を出力する。翻訳キャッシュで API コストを節約する。
+translated.json と出力 PDF を検査し、翻訳漏れ・レイアウト問題を報告する。
 
 ## 入力
-- `--input`  : parsed.json パス
-- `--output` : 出力 translated.json パス（省略時: <stem>.translated.json）
-- `--cache`  : 翻訳キャッシュ .json パス（省略時: <PDF stem>.ja.transcache.json）
-- `--context`: 術語・背景知識ファイルパス（省略可）
-- `--batch`  : 一バッチあたりの最大ブロック数（デフォルト: 40）
+- `--json`   : translated.json パス
+- `--pdf`    : 出力 PDF パス（レイアウト検査用）
+- `--output` : QA レポート JSON パス（省略時: qa_report.json）
+- `--thumbs` : サムネイル出力ディレクトリ（省略時: スキップ）
 
-## 出力 (translated.json)
-parsed.json と同一スキーマ。各 block に `"translated": "..."` フィールドを追加。
+## 出力 (qa_report.json)
+```json
+{
+  "summary": {
+    "total_blocks": 120,
+    "translated_blocks": 118,
+    "coverage_pct": 98.3,
+    "issues": 2
+  },
+  "issues": [
+    {
+      "page": 3,
+      "block_id": "p03_b005",
+      "type": "missing_translation",
+      "text": "original text",
+      "translated": ""
+    }
+  ]
+}
+```
 
 ## 完了基準
-- 全ブロックの translated フィールドが非空
-- キャッシュに新規翻訳を書き込み済み
-- 完了後 commit: "feat(translate): initial translate agent"
+- 翻訳カバレッジ ≥ 95% であること
+- issues リストに全問題が記録されていること
+- 完了後 commit: "feat(qa): initial qa agent"
