@@ -422,6 +422,11 @@ def render_page(
     bboxes = [fitz.Rect(b["bbox"]) for b in blocks]
     source_sizes = [float(b.get("font_size", 10.0)) for b in blocks]
     aligns = [int(b.get("align", 0)) for b in blocks]  # 0=left,1=center,2=right
+    # Preserve original text color; normalize from [R,G,B] list to tuple
+    source_colors = [
+        tuple(float(c) for c in b.get("color", [0.0, 0.0, 0.0]))
+        for b in blocks
+    ]
 
     # ------------------------------------------------------------------
     # Step 3: Adjacent merge (skipped when plan is provided — consolidator
@@ -537,7 +542,8 @@ def render_page(
     for idx, (ibbox, text, rs, align) in enumerate(
         zip(insert_bboxes, translated_texts, render_sizes, aligns)
     ):
-        color = (0, 0, 0)
+        src_color = source_colors[idx] if idx < len(source_colors) else (0.0, 0.0, 0.0)
+        color = visual.adjust_color(src_color)
         insert_text_fitting(
             page, ibbox, text,
             base_size=rs,
