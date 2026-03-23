@@ -727,12 +727,15 @@ def main() -> None:
     with open(json_path, encoding="utf-8") as f:
         translated_data = json.load(f)
 
-    # translated_data is expected to be a dict: {page_num_str: page_data}
-    # or a list indexed by page number.
-    if isinstance(translated_data, list):
-        page_map = {str(i + 1): d for i, d in enumerate(translated_data)}
+    # Normalise JSON schema: {"version":..., "pages":[...]} or list
+    if isinstance(translated_data, dict) and "pages" in translated_data:
+        pages_list = translated_data["pages"]
+    elif isinstance(translated_data, list):
+        pages_list = translated_data
     else:
-        page_map = {str(k): v for k, v in translated_data.items()}
+        print("[ERROR] Unrecognised translated.json schema", file=sys.stderr)
+        sys.exit(1)
+    page_map = {str(p["page_num"]): p for p in pages_list}
 
     # Determine which pages to process
     if args.pages:
