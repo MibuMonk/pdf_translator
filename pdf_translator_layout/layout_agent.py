@@ -656,9 +656,12 @@ def main() -> None:
                     f"unique chars ({pct:.1f}%): {''.join(sorted(missing_chars)[:20])}",
                     file=sys.stderr,
                 )
-                # Try to find a better font
-                better = find_cjk_font(args.tgt + "-fallback", hint=None)
-                # Re-scan with a wider net: prefer fonts with fewer missing glyphs
+                # Re-scan system fonts for a better alternative.
+                # Candidate must: (a) cover more of the missing chars,
+                # AND (b) render the primary CJK script (exclude fallback/placeholder fonts).
+                _CJK_PROBE = "日本語テスト한국어中文"  # hiragana/katakana/kanji/hangul/hanzi
+                _SKIP_FONTS = {"lastresort", "applecoloremo", ".lastresort"}
+
                 best_font, best_missing = cjk_font, len(missing_chars)
                 for root in ["/System/Library/Fonts", "/Library/Fonts",
                              os.path.expanduser("~/Library/Fonts")]:
@@ -668,9 +671,14 @@ def main() -> None:
                         for fn in filenames:
                             if not fn.lower().endswith((".ttf", ".ttc", ".otf")):
                                 continue
+                            if any(skip in fn.lower() for skip in _SKIP_FONTS):
+                                continue
                             fp = os.path.join(dirpath, fn)
                             try:
                                 f2 = fitz.Font(fontfile=fp)
+                                # Must render the primary script
+                                if not all(f2.has_glyph(ord(ch)) for ch in _CJK_PROBE):
+                                    continue
                                 m = sum(1 for ch in unique_chars if not f2.has_glyph(ord(ch)))
                                 if m < best_missing:
                                     best_missing = m
@@ -684,6 +692,12 @@ def main() -> None:
                         file=sys.stderr,
                     )
                     cjk_font = best_font
+                else:
+                    print(
+                        f"[INFO] No better font found; keeping {os.path.basename(cjk_font)} "
+                        f"(missing chars are non-critical symbols)",
+                        file=sys.stderr,
+                    )
             else:
                 print(f"[INFO] Font coverage: all {len(unique_chars)} unique chars present.", file=sys.stderr)
         except Exception as exc:
