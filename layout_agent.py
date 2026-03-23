@@ -8,7 +8,6 @@ Usage:
 """
 
 import argparse
-import bisect
 import json
 import os
 import re
@@ -17,6 +16,11 @@ from pathlib import Path
 from typing import Optional
 
 import fitz  # PyMuPDF
+
+# Sub-agent helpers (same directory)
+sys.path.insert(0, str(Path(__file__).parent))
+from visual_agent import VisualOptimizer       # noqa: E402
+from topology_agent import TopologyAnalyzer    # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -318,108 +322,6 @@ def _cluster(vals: list, tol: float = 3.0, min_count: int = 2) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Voronoi cell tree (axis-parallel L∞)
-# ---------------------------------------------------------------------------
-
-def _build_cell_tree(
-    bboxes: list,
-    page_rect: fitz.Rect,
-    obstacles: Optional[list] = None,
-) -> list:
-    """Compute axis-parallel Voronoi cells for each bbox.
-
-    Each cell is a fitz.Rect that represents the maximum space available to
-    that bbox, bounded by the page and any obstacles (image regions).
-
-    Row-aware x-boundaries: only obstacles with y-overlap (±b.height tolerance).
-    Column-aware y-boundaries: only obstacles with x-overlap (±b.width tolerance).
-    """
-    if obstacles is None:
-        obstacles = []
-
-    all_rects = list(bboxes) + list(obstacles)
-    cells = []
-
-    for i, b in enumerate(bboxes):
-        cx = (b.x0 + b.x1) / 2.0
-        cy = (b.y0 + b.y1) / 2.0
-        bw = b.width
-        bh = b.height
-
-        # Y-tolerance for x-boundary search (row-aware)
-        Y_TOL = bh
-        # X-tolerance for y-boundary search (column-aware)
-        X_TOL = bw
-
-        # Start with full page
-        cell_x0 = page_rect.x0
-        cell_x1 = page_rect.x1
-        cell_y0 = page_rect.y0
-        cell_y1 = page_rect.y1
-
-        for j, obs in enumerate(all_rects):
-            if j == i:
-                continue
-
-            obs_cx = (obs.x0 + obs.x1) / 2.0
-            obs_cy = (obs.y0 + obs.y1) / 2.0
-
-            # X-boundary (left/right): only if y-overlap within tolerance
-            y_overlap = not (obs.y1 < b.y0 - Y_TOL or obs.y0 > b.y1 + Y_TOL)
-            if y_overlap:
-                if obs_cx < cx and obs.x1 > cell_x0:
-                    cell_x0 = max(cell_x0, obs.x1)
-                elif obs_cx > cx and obs.x0 < cell_x1:
-                    cell_x1 = min(cell_x1, obs.x0)
-
-            # Y-boundary (top/bottom): only if x-overlap within tolerance
-            x_overlap = not (obs.x1 < b.x0 - X_TOL or obs.x0 > b.x1 + X_TOL)
-            if x_overlap:
-                if obs_cy < cy and obs.y1 > cell_y0:
-                    cell_y0 = max(cell_y0, obs.y1)
-                elif obs_cy > cy and obs.y0 < cell_y1:
-                    cell_y1 = min(cell_y1, obs.y0)
-
-        # Guarantee cell covers at least the original bbox
-        cell_x0 = min(cell_x0, b.x0)
-        cell_x1 = max(cell_x1, b.x1)
-        cell_y0 = min(cell_y0, b.y0)
-        cell_y1 = max(cell_y1, b.y1)
-
-        cells.append(fitz.Rect(cell_x0, cell_y0, cell_x1, cell_y1))
-
-    return cells
-
-
-# ---------------------------------------------------------------------------
-# Insert-bbox computation from Voronoi cell
-# ---------------------------------------------------------------------------
-
-def _cell_insert_bbox(bbox: fitz.Rect, cell: fitz.Rect, align: int) -> fitz.Rect:
-    """Compute the actual insertion rect for a block within its Voronoi cell.
-
-    align==2 (RIGHT): anchor right edge to bbox.x1, extend left to cell.x0+MARGIN
-    else (LEFT/CENTER): anchor left edge to bbox.x0, extend right to cell.x1-MARGIN
-    y0 = bbox.y0, y1 = cell.y1 - MARGIN
-    """
-    if align == 2:  # RIGHT
-        x0 = cell.x0 + _MARGIN
-        x1 = bbox.x1
-    else:  # LEFT or CENTER
-        x0 = bbox.x0
-        x1 = cell.x1 - _MARGIN
-
-    y0 = bbox.y0
-    y1 = cell.y1 - _MARGIN
-
-    # Guarantee >= original bbox
-    x0 = min(x0, bbox.x0)
-    x1 = max(x1, bbox.x1)
-    y0 = min(y0, bbox.y0)
-    y1 = max(y1, bbox.y1)
-
-    return fitz.Rect(x0, y0, x1, y1)
 
 
 # ---------------------------------------------------------------------------
@@ -485,29 +387,6 @@ def _merge_adjacent_blocks(
 
     return translated_texts, bboxes, font_sizes
 
-
-def _consistency_pass(fitting_sizes: list, source_sizes: list) -> list:
-    """Cap fitting sizes per source_size group at the 80th percentile.
-
-    For each group, sort descending, take the value at index = int(len*0.2)
-    as the 80th-percentile cap.
-    """
-    # Build groups
-    groups: dict[float, list] = {}
-    for fs, ss in zip(fitting_sizes, source_sizes):
-        groups.setdefault(ss, []).append(fs)
-
-    caps: dict[float, float] = {}
-    for ss, sizes in groups.items():
-        sorted_desc = sorted(sizes, reverse=True)
-        idx = int(len(sorted_desc) * 0.2)
-        idx = min(idx, len(sorted_desc) - 1)
-        caps[ss] = sorted_desc[idx]
-
-    render_sizes = []
-    for fs, ss in zip(fitting_sizes, source_sizes):
-        render_sizes.append(min(fs, caps[ss]))
-    return render_sizes
 
 
 def render_page(
@@ -605,60 +484,29 @@ def render_page(
     fn = font_name or "helv"
 
     # ------------------------------------------------------------------
-    # Step 7: Voronoi cells
+    # Step 7+8: Topology analysis — Voronoi cells + insert_bboxes
     # ------------------------------------------------------------------
-    cells = _build_cell_tree(bboxes, page_rect, obstacles=image_obstacles)
+    drawings = page.get_drawings()
+    topo_result = TopologyAnalyzer(page_rect).analyze(
+        bboxes, aligns, drawings, image_obstacles
+    )
+    cells = topo_result.cells
+    insert_bboxes = topo_result.insert_bboxes
 
     # ------------------------------------------------------------------
-    # Step 8: Compute insert_bboxes, clipped against image obstacles
+    # Step 9: Phase 2 — compute fitting_sizes via VisualOptimizer
     # ------------------------------------------------------------------
-    insert_bboxes = []
-    for bbox, cell, align in zip(bboxes, cells, aligns):
-        ibbox = _cell_insert_bbox(bbox, cell, align)
-
-        # Clip against each image obstacle
-        for obs in image_obstacles:
-            # If obstacle overlaps ibbox from the right, shrink x1
-            if obs.x0 < ibbox.x1 and obs.y0 < ibbox.y1 and obs.y1 > ibbox.y0:
-                if obs.x0 > ibbox.x0:
-                    ibbox = fitz.Rect(ibbox.x0, ibbox.y0, min(ibbox.x1, obs.x0), ibbox.y1)
-            # If obstacle overlaps from the left, shrink x0
-            if obs.x1 > ibbox.x0 and obs.y0 < ibbox.y1 and obs.y1 > ibbox.y0:
-                if obs.x1 < ibbox.x1:
-                    ibbox = fitz.Rect(max(ibbox.x0, obs.x1), ibbox.y0, ibbox.x1, ibbox.y1)
-            # If obstacle overlaps from the bottom, shrink y1
-            if obs.y0 > ibbox.y0 and obs.x0 < ibbox.x1 and obs.x1 > ibbox.x0:
-                if obs.y0 < ibbox.y1:
-                    ibbox = fitz.Rect(ibbox.x0, ibbox.y0, ibbox.x1, min(ibbox.y1, obs.y0))
-
-        # Guarantee at least original bbox
-        ibbox = fitz.Rect(
-            min(ibbox.x0, bbox.x0),
-            min(ibbox.y0, bbox.y0),
-            max(ibbox.x1, bbox.x1),
-            max(ibbox.y1, bbox.y1),
-        )
-        insert_bboxes.append(ibbox)
+    visual = VisualOptimizer(page, fontname=fn, fontfile=cjk_font)
+    fitting_sizes = [
+        visual.fitting_size(ibbox, text, ss, color=(0, 0, 0), align=align)
+        for ibbox, text, ss, align in zip(insert_bboxes, translated_texts, source_sizes, aligns)
+    ]
 
     # ------------------------------------------------------------------
-    # Step 9: Phase 2 — compute fitting_sizes
+    # Step 10: Consistency pass via VisualOptimizer
     # ------------------------------------------------------------------
-    fitting_sizes = []
-    for idx, (ibbox, text, ss, align) in enumerate(
-        zip(insert_bboxes, translated_texts, source_sizes, aligns)
-    ):
-        base = ss if idx not in title_indices else ss
-        fs = _find_fitting_size(
-            page, ibbox, text, base_size=base,
-            color=(0, 0, 0), align=align,
-            fontname=fn, min_size=4.0,
-        )
-        fitting_sizes.append(fs)
-
-    # ------------------------------------------------------------------
-    # Step 10: Consistency pass
-    # ------------------------------------------------------------------
-    render_sizes = _consistency_pass(fitting_sizes, source_sizes)
+    title_mask = [i in title_indices for i in range(len(fitting_sizes))]
+    render_sizes = visual.consistency_map(fitting_sizes, source_sizes, title_mask)
 
     # ------------------------------------------------------------------
     # Step 11: Phase 3 — render
