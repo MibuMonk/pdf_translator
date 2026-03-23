@@ -139,11 +139,15 @@ class VisualOptimizer:
         percentile: float = 0.80,
     ) -> List[float]:
         """
-        Apply 80th-percentile cap per base_size group.
-        Returns render_sizes[i] = min(fitting_sizes[i], cap[base_sizes[i]]).
-        Title blocks (title_mask[i]=True) are uncapped.
+        Apply 80th-percentile cap per base_size group (body blocks only).
+        Title blocks are uncapped but isolated from body groups.
+        No body block may exceed the global body maximum fitting_size.
         """
         n = len(fitting_sizes)
+
+        # Global body ceiling: body blocks must not exceed the largest body fitting_size
+        body_fitting = [fitting_sizes[i] for i in range(n) if not title_mask[i]]
+        global_body_cap = max(body_fitting) if body_fitting else float("inf")
 
         # Collect non-title indices per base_size group
         groups: dict = {}
@@ -152,17 +156,17 @@ class VisualOptimizer:
                 key = base_sizes[i]
                 groups.setdefault(key, []).append(i)
 
-        # Compute cap per base_size
+        # Compute 80th-percentile cap per base_size group (body only)
         cap: dict = {}
         for base_size, indices in groups.items():
             if len(indices) < 3:
-                cap[base_size] = base_size
+                cap[base_size] = min(base_size, global_body_cap)
             else:
                 sorted_desc = sorted(
                     [fitting_sizes[i] for i in indices], reverse=True
                 )
-                k = int(len(sorted_desc) * (1 - percentile))  # int(n * 0.20)
-                cap[base_size] = sorted_desc[k]
+                k = int(len(sorted_desc) * (1 - percentile))
+                cap[base_size] = min(sorted_desc[k], global_body_cap)
 
         # Build result
         result: List[float] = []
@@ -170,9 +174,60 @@ class VisualOptimizer:
             if title_mask[i]:
                 result.append(fitting_sizes[i])
             else:
-                c = cap.get(base_sizes[i], base_sizes[i])
+                c = cap.get(base_sizes[i], min(base_sizes[i], global_body_cap))
                 result.append(min(fitting_sizes[i], c))
         return result
+
+    def parallel_normalize(
+        self,
+        render_sizes: List[float],
+        source_colors: List[tuple],
+        bboxes: List["fitz.Rect"],
+        x_tol: float = 15.0,
+        y_tol: float = 6.0,
+        min_group: int = 2,
+    ) -> tuple:
+        """
+        Detect parallel sibling blocks and normalize their font sizes and colors.
+
+        Parallel = blocks sharing the same x0 (vertical stack in same column)
+                   OR same y0 (horizontal row of siblings).
+        Within each group: font size → min(fitting_sizes); color → most common.
+
+        Returns (normalized_sizes, normalized_colors).
+        """
+        import statistics
+
+        n = len(render_sizes)
+        sizes = list(render_sizes)
+        colors = list(source_colors)
+
+        def _group_by(key_fn):
+            buckets: dict = {}
+            for i in range(n):
+                k = round(key_fn(i) / x_tol) * x_tol  # bin to tolerance grid
+                buckets.setdefault(k, []).append(i)
+            return [idxs for idxs in buckets.values() if len(idxs) >= min_group]
+
+        x0_groups = _group_by(lambda i: bboxes[i].x0)
+        y0_groups = _group_by(lambda i: bboxes[i].y0)
+
+        for group in x0_groups + y0_groups:
+            # Unify font size to minimum (most conservative fit)
+            min_size = min(sizes[i] for i in group)
+            for i in group:
+                sizes[i] = min_size
+
+            # Unify color to most common
+            color_list = [colors[i] for i in group]
+            try:
+                dominant = statistics.mode(color_list)
+            except statistics.StatisticsError:
+                dominant = color_list[0]
+            for i in group:
+                colors[i] = dominant
+
+        return sizes, colors
 
     def adjust_color(
         self,
