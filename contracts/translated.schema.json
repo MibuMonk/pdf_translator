@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "translated.schema.json",
+  "description": "Output of translate_agent. Extends parsed.schema.json — every block gains a 'translated' field.",
+  "$ref": "parsed.schema.json",
+  "notes": [
+    "Schema is identical to parsed.schema.json with one addition:",
+    "Each block MUST include a 'translated' field (string, may be empty string on failure).",
+    "translate_agent must NOT alter any other block field."
+  ],
+  "block_extension": {
+    "translated": {
+      "type": "string",
+      "description": "Translated text. Empty string if translation failed. MUST preserve \\n structure."
+    }
+  }
+}

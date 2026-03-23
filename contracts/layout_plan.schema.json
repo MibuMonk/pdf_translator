@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "layout_plan.schema.json",
+  "description": "Output of space_planner. Pre-computed geometry for render_agent. No translated text needed to produce this.",
+  "type": "object",
+  "required": ["version", "pages"],
+  "properties": {
+    "version": { "type": "string" },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_num", "cells", "snap_map", "title_indices"],
+        "properties": {
+          "page_num": { "type": "integer", "minimum": 1 },
+          "cells": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["block_id", "insert_bbox", "is_title", "is_dense"],
+              "properties": {
+                "block_id":    { "type": "string" },
+                "insert_bbox": {
+                  "type": "array",
+                  "description": "Voronoi-expanded bbox available for translated text insertion.",
+                  "items": { "type": "number" },
+                  "minItems": 4, "maxItems": 4
+                },
+                "is_title":  { "type": "boolean" },
+                "is_dense":  { "type": "boolean", "description": "True if page is above-average block density." }
+              }
+            }
+          },
+          "snap_map": {
+            "type": "object",
+            "description": "Maps original y0 string → snapped y0 float for grid alignment.",
+            "additionalProperties": { "type": "number" }
+          },
+          "title_indices": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "description": "Indices into cells[] that are titles."
+          }
+        }
+      }
+    }
+  }
+}

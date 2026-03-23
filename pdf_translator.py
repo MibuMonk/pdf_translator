@@ -65,7 +65,14 @@ SKIP_TEXT_PATTERNS = [
 def is_skip_text(text: str) -> bool:
     """返回 True 表示该文本块应原样保留，不做任何处理。"""
     t = text.strip()
-    return any(p.search(t) for p in SKIP_TEXT_PATTERNS)
+    if any(p.search(t) for p in SKIP_TEXT_PATTERNS):
+        return True
+    # 碎片水印检测：短文本中含有 Confidential/Honda 片段
+    if len(t) <= 25:
+        tl = t.lower().replace('\xa0', ' ')  # normalize nbsp to space
+        if any(frag in tl for frag in ('confid', 'nfide', 'fidenti', 'honda', 'view only', 'ential', 'w only', ' only')):
+            return True
+    return False
 
 
 def find_cjk_font(target_lang: str, hint: Optional[str] = None) -> Optional[str]:
@@ -112,6 +119,23 @@ def is_watermark_block(block: dict, page_rect: fitz.Rect) -> bool:
         if abs(dir_y) > 0.1:
             return True
 
+    return False
+
+
+def _has_cjk(text: str) -> bool:
+    """返回 True 若 text 包含任意 CJK / 假名字符，或需要 CJK 字体的特殊符号。"""
+    for c in text:
+        cp = ord(c)
+        if (0x4E00 <= cp <= 0x9FFF or
+                0x3040 <= cp <= 0x30FF or   # 平假名 + 片假名
+                0xFF00 <= cp <= 0xFFEF or   # 全角字符
+                0x3000 <= cp <= 0x303F or   # CJK 标点
+                0x25A0 <= cp <= 0x25FF or   # Geometric Shapes (■□▲▶◆○●▸►…)
+                0x2600 <= cp <= 0x26FF or   # Miscellaneous Symbols (✓☆★…)
+                0x2700 <= cp <= 0x27BF or   # Dingbats
+                0x2010 <= cp <= 0x2027 or   # 一般的なダッシュ・ハイフン類 (—–…‐)
+                0x2030 <= cp <= 0x205E):    # 引用符・記号類 (‹›«»†‡…)
+            return True
     return False
 
 
@@ -168,7 +192,7 @@ def try_expand_bbox(orig_bbox: fitz.Rect, text: str, font_size: float,
     EDGE = 2        # 距页面边缘最小留白
     MAX_MUL = 4.0   # 最大扩展倍率（面积）
     GRAPHIC_DARK_THRESHOLD = 0.05  # 扩展新增区域暗像素 > 5% → 有矢量图形 → 放弃扩展
-    orig_area = max(1.0, orig_bbox.get_area())
+    orig_area = max(1.0, orig_bbox.width * orig_bbox.height)
 
     # 预先提取 pixmap 参数（可能为 None）
     pix_samples = orig_pixmap.samples if orig_pixmap else None
@@ -205,6 +229,9 @@ def try_expand_bbox(orig_bbox: fitz.Rect, text: str, font_size: float,
 
     def no_collision(cand: fitz.Rect) -> bool:
         for ob in other_bboxes:
+            # 元の bbox と既に重なっているブロックは同一セルの兄弟ブロック → スキップ
+            if orig_bbox.intersects(ob):
+                continue
             inter = cand & ob
             if inter.width > 1 and inter.height > 1:
                 return False
@@ -235,7 +262,7 @@ def try_expand_bbox(orig_bbox: fitz.Rect, text: str, font_size: float,
         new_y1 = max(orig_bbox.y1,
                      min(page_rect.height - EDGE, orig_bbox.y0 + line_height * 1.1))
         cand = fitz.Rect(orig_bbox.x0, orig_bbox.y0, new_x1, new_y1)
-        if cand.get_area() <= orig_area * MAX_MUL and no_collision(cand) and expansion_is_clear(cand):
+        if cand.width * cand.height <= orig_area * MAX_MUL and no_collision(cand) and expansion_is_clear(cand):
             best = cand
 
     # ── Phase 2: 以当前最优宽度，向下扩展高度（多行）───────────
@@ -254,7 +281,7 @@ def try_expand_bbox(orig_bbox: fitz.Rect, text: str, font_size: float,
     if needed_h > (best.y1 - best.y0):
         new_y1 = min(page_rect.height - EDGE, best.y0 + needed_h)
         cand2 = fitz.Rect(best.x0, best.y0, best.x1, new_y1)
-        if cand2.get_area() <= orig_area * MAX_MUL and no_collision(cand2) and expansion_is_clear(cand2):
+        if cand2.width * cand2.height <= orig_area * MAX_MUL and no_collision(cand2) and expansion_is_clear(cand2):
             best = cand2
 
     return best
@@ -503,34 +530,65 @@ def _apply_zorder(page: fitz.Page, item_anchors: List, translations: List[str],
                 pass
 
 
-def fit_fontsize(text: str, bbox: fitz.Rect, base_size: float,
-                 min_factor: float = 0.4) -> float:
+def _find_fitting_size(
+    page: fitz.Page, bbox: fitz.Rect, text: str,
+    base_size: float, color: tuple, align: int,
+    fontname: Optional[str] = None,
+    min_size: float = 4.0,
+) -> float:
     """
-    用字符宽度估算找到能放入 bbox 的最大字号。
-    不需要实际插入，速度快，作为 Shape dry-run 前的预筛选。
-    只尝试 >= min_factor 的缩放比例。
+    Binary search for the largest font size in [min_size, base_size] that fits
+    text in bbox. Uses Shape dry-run (no page write).
     """
-    candidates = [f for f in _SHRINK_FACTORS if f >= min_factor - 0.001]
-    if not candidates:
-        candidates = [min_factor]
-    for factor in candidates:
-        size = base_size * factor
-        if size < 4:
-            return 4.0
-        line_height = size * _LINE_HEIGHT_FACTOR
-        total_height = 0.0
-        for raw_line in text.split("\n"):
-            em_w = estimate_em_width(raw_line)
-            chars_per_row = max(1.0, bbox.width / size)
-            rows = math.ceil(em_w / chars_per_row) if em_w > 0 else 1
-            total_height += rows * line_height
-        if total_height <= bbox.height + size * 0.3:  # 允许小误差
-            return size
-    return max(4.0, base_size * min_factor)
+    if fontname and not _has_cjk(text):
+        fontname = None
+    font_kw: dict = {}
+    if fontname:
+        font_kw["fontname"] = fontname
 
+    if any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in text):
+        text = text.replace(' ', '\u00a0')
 
-# `insert_text_fitting` の因子リストにも 0.75 を追加（fit_fontsize と揃える）
-_SHRINK_FACTORS = [1.0, 0.9, 0.8, 0.75, 0.7, 0.6, 0.5, 0.4]
+    # Small bbox: single-line shortcut
+    if bbox.height < base_size * _LINE_HEIGHT_FACTOR and bbox.height > 0:
+        return max(min_size, min(base_size, bbox.height / _LINE_HEIGHT_FACTOR))
+
+    # ASCII pre-check at base_size with reduced lineheight
+    if not _has_cjk(text):
+        for _lh in [1.2, 1.0]:
+            _shape = page.new_shape()
+            try:
+                _rc = _shape.insert_textbox(bbox, text, fontsize=base_size,
+                                            color=color, align=align,
+                                            lineheight=_lh, **font_kw)
+                if _rc >= 0:
+                    return base_size
+            except Exception:
+                break
+
+    def _fits(size: float) -> bool:
+        shape = page.new_shape()
+        try:
+            rc = shape.insert_textbox(bbox, text, fontsize=size,
+                                      color=color, align=align,
+                                      lineheight=_LINE_HEIGHT_FACTOR, **font_kw)
+            return rc >= 0
+        except Exception:
+            return True  # unsupported font → assume fits
+
+    if _fits(base_size):
+        return base_size
+    if not _fits(min_size):
+        return min_size
+
+    lo, hi = min_size, base_size
+    for _ in range(8):  # 8 iterations → ~1pt precision
+        mid = (lo + hi) / 2.0
+        if _fits(mid):
+            lo = mid
+        else:
+            hi = mid
+    return max(min_size, lo)
 
 
 def insert_text_fitting(page: fitz.Page, bbox: fitz.Rect, text: str,
@@ -543,6 +601,14 @@ def insert_text_fitting(page: fitz.Page, bbox: fitz.Rect, text: str,
     fontname 是已通过 page.insert_font 注册的字体名，Shape 只接受 fontname。
     fontfile 仅用于兜底的 page.insert_textbox（不走 Shape）。
     """
+    # 纯 ASCII / 拉丁文本（无 CJK / 假名）不使用 CJK 字体：
+    # ヒラギノ等 CJK 字体渲染拉丁字母比原 PPT 字体宽约 30%，
+    # 导致"Data SPA"等产品名在原本能容纳的宽度内溢出而被缩小。
+    # 使用系统默认字体（Helvetica 系）可还原与原文相近的字宽。
+    if fontname and not _has_cjk(text):
+        fontname = None
+        fontfile = None
+
     font_kw: dict = {}
     if fontname:
         font_kw["fontname"] = fontname
@@ -556,14 +622,24 @@ def insert_text_fitting(page: fitz.Page, bbox: fitz.Rect, text: str,
     # 用 bbox 能容纳的最大字号直接插入，跳过缩减循环
     one_line_height = base_size * _LINE_HEIGHT_FACTOR
     if bbox.height < one_line_height and bbox.height > 0:
-        # 确保行高不超过 bbox 高度，否则 PyMuPDF 不渲染
-        forced_size = max(4.0, min(base_size, bbox.height / _LINE_HEIGHT_FACTOR))
         fb_base: dict = {"color": color, "align": align}
         if fontname:
             fb_base["fontname"] = fontname
         elif fontfile:
             fb_base["fontfile"] = fontfile
             fb_base["fontname"] = "F0"
+        # 先用 base_size + 压缩行距尝试（bbox 仅略矮于标准行高时仍能保持原字号）
+        for lh in [1.0, 0.9, 0.8]:
+            if bbox.height >= base_size * lh:
+                try:
+                    rc = page.insert_textbox(bbox, text, fontsize=base_size,
+                                             lineheight=lh, **fb_base)
+                    if rc >= 0:
+                        return True
+                except Exception:
+                    break
+        # base_size 行不通，用 forced_size 往下缩减
+        forced_size = max(4.0, min(base_size, bbox.height / _LINE_HEIGHT_FACTOR))
         # 依次尝试更小字号 + 更小行距，直到文字不溢出（CJK 字体比英文需要更多垂直空间）
         # 行距从 1.4 逐步压缩到 0.8，确保即使 bbox 非常矮（如 5pt）也能放下单行文字。
         for trial_size in [forced_size, forced_size * 0.9, forced_size * 0.8,
@@ -591,31 +667,39 @@ def insert_text_fitting(page: fitz.Page, bbox: fitz.Rect, text: str,
             pass
         return True
 
-    # 用估算缩小搜索范围，但至少保留 4 个梯度
-    start_size = fit_fontsize(text, bbox, base_size, min_factor=min_factor)
-    start_factor = (start_size / base_size) if base_size > 0 else min_factor
-    all_factors = [f for f in _SHRINK_FACTORS if f >= min_factor - 0.001]
-    if not all_factors:
-        all_factors = [min_factor]
-    factors = [f for f in all_factors if f <= start_factor + 0.15] or all_factors
+    # 对于纯 ASCII 文本（无 CJK）使用系统默认字体（Helvetica），
+    # 其自然行距比 CJK 字体小，可用压缩 lineheight 来保持原字号。
+    # 先以 base_size + lh∈[1.2, 1.0] 尝试；成功则直接提交，跳过缩减循环。
+    if not _has_cjk(text):
+        for _lh in [1.2, 1.0]:
+            _shape = page.new_shape()
+            try:
+                _rc = _shape.insert_textbox(bbox, text, fontsize=base_size,
+                                            color=color, align=align,
+                                            lineheight=_lh, **font_kw)
+                if _rc >= 0:
+                    _shape.commit()
+                    return True
+            except Exception:
+                break
 
-    for factor in factors:
-        size = max(4.0, base_size * factor)
-        shape = page.new_shape()
-        try:
-            rc = shape.insert_textbox(bbox, text, fontsize=size,
-                                      color=color, align=align,
-                                      lineheight=_LINE_HEIGHT_FACTOR, **font_kw)
-            if rc >= 0:
-                shape.commit()
-                return True
-            # 溢出 → 不 commit，继续缩小
-        except Exception:
-            # Shape 不支持该字体参数 → 跳出，走 page.insert_textbox 兜底
-            break
+    # Binary search for fitting size, then commit
+    _min_size = max(4.0, base_size * min_factor)
+    size = _find_fitting_size(page, bbox, text, base_size, color, align,
+                              fontname=fontname, min_size=_min_size)
+    shape = page.new_shape()
+    try:
+        rc = shape.insert_textbox(bbox, text, fontsize=size,
+                                  color=color, align=align,
+                                  lineheight=_LINE_HEIGHT_FACTOR, **font_kw)
+        if rc >= 0:
+            shape.commit()
+            return True
+    except Exception:
+        pass  # unsupported font → fall through to page.insert_textbox
 
     # 兜底：直接用 page.insert_textbox（支持 fontfile）
-    fb: dict = {"fontsize": max(4.0, base_size * min_factor), "color": color, "align": align,
+    fb: dict = {"fontsize": size, "color": color, "align": align,
                 "lineheight": _LINE_HEIGHT_FACTOR}
     if fontname:
         fb["fontname"] = fontname
@@ -628,16 +712,328 @@ def insert_text_fitting(page: fitz.Page, bbox: fitz.Rect, text: str,
             return True
     except Exception:
         return False
-    # rc < 0 → 文本在 bbox 里放不下（通常因为窄列需要多行但高度不足）
-    # 截断为单行能容纳的字数 + 省略号，保证至少有内容可见
-    fs = fb["fontsize"]
-    max_chars = max(1, int(bbox.width / fs))
+    # rc < 0 → 截断为单行能容纳的字数，保证至少有内容可见
+    max_chars = max(1, int(bbox.width / size))
     display_text = _truncate_to_em_width(text, max_chars)
     try:
         page.insert_textbox(bbox, display_text, **fb)
     except Exception:
         pass
     return True
+
+
+def _get_fitting_size(page: fitz.Page, bbox: fitz.Rect, text: str,
+                      base_size: float, color: tuple, align: int,
+                      fontname: Optional[str] = None,
+                      fontfile: Optional[str] = None,
+                      min_factor: float = 0.4) -> float:
+    """Thin wrapper around _find_fitting_size for backwards compatibility."""
+    return _find_fitting_size(
+        page, bbox, text, base_size, color, align,
+        fontname=fontname,
+        min_size=max(4.0, base_size * min_factor),
+    )
+
+
+def _build_size_map(samples: dict) -> dict:
+    """
+    {source_size: [actual_size, ...]} → {source_size: mapped_size}
+
+    mapped_size = 80th percentile from top（= 上位 80% のセルが収まる最大字号）。
+    サンプル数 < 3 の場合はそのまま source_size を返す（外れ値対策）。
+    """
+    mapping: dict = {}
+    for src_size, sizes in samples.items():
+        if len(sizes) < 3:
+            mapping[src_size] = src_size
+            continue
+        sorted_desc = sorted(sizes, reverse=True)
+        # index at 20% from top → 80% of cells fit at ≥ this size
+        k = min(len(sorted_desc) - 1, max(0, int(len(sorted_desc) * 0.2)))
+        mapping[src_size] = round(sorted_desc[k], 2)
+    return mapping
+
+
+_BULLET_RE = re.compile(r'^\s*(?:\d+\.?\s|[•§·▪▸►▶◆◇○●]\s?)')
+
+
+def _is_bullet(text: str) -> bool:
+    """テキストが箇条書き（番号付き・記号付き）で始まるか判定。"""
+    return bool(_BULLET_RE.match(text))
+
+
+# ── 隐式网格检测 ──────────────────────────────────────────────────────────────
+
+def _cluster(vals: list, tol: float = 3.0, min_count: int = 2) -> list:
+    """
+    将一组浮点数按容差 tol 分组，返回出现次数 ≥ min_count 的分组的重心列表。
+    用于从 bbox 边缘坐标中提取"频繁出现的对齐线"（即隐式网格线）。
+    """
+    if not vals:
+        return []
+    vals = sorted(set(round(v, 2) for v in vals))
+    clusters: list = []
+    group = [vals[0]]
+    for v in vals[1:]:
+        if v - group[-1] <= tol:
+            group.append(v)
+        else:
+            if len(group) >= min_count:
+                clusters.append(sum(group) / len(group))
+            group = [v]
+    if len(group) >= min_count:
+        clusters.append(sum(group) / len(group))
+    return clusters
+
+
+def _detect_grid(bboxes: List[fitz.Rect], tol: float = 3.0, min_count: int = 2):
+    """
+    从所有 block bbox 的四条边中检测隐式网格线。
+    返回 (x_lines, y_lines)：出现 ≥ min_count 次的 x / y 坐标列表（已排序）。
+    """
+    x_vals: list = []
+    y_vals: list = []
+    for b in bboxes:
+        x_vals += [b.x0, b.x1]
+        y_vals += [b.y0, b.y1]
+    return _cluster(x_vals, tol, min_count), _cluster(y_vals, tol, min_count)
+
+
+def _cell_of(bbox: fitz.Rect, x_lines: list, y_lines: list,
+             tol: float = 3.0) -> fitz.Rect:
+    """
+    根据网格线，找到 bbox 所在的"格子"（cell）。
+
+    - cell_x0：bbox.x0 左侧（含）最近的网格线
+    - cell_x1：bbox.x1 右侧（含）最近的网格线（须与 cell_x0 有足够间距）
+    - cell_y0：bbox.y0 上方（含）最近的网格线
+    - cell_y1：bbox.y1 **之后 5pt 以上**的最近网格线
+              （+5pt 跨过少数派块自身的 y1，找到真实行底边）
+
+    返回值保证 cell ≥ bbox（不会收缩原始 bbox）。
+    """
+    # 左壁
+    left = [x for x in x_lines if x <= bbox.x0 + tol]
+    cell_x0 = max(left) if left else bbox.x0
+
+    # 右壁：必须比 cell_x0 宽出足够空间（> tol），避免退化为零宽格
+    right = [x for x in x_lines if x >= bbox.x1 - tol and x > cell_x0 + tol]
+    cell_x1 = min(right) if right else bbox.x1
+
+    # 顶壁
+    top = [y for y in y_lines if y <= bbox.y0 + tol]
+    cell_y0 = max(top) if top else bbox.y0
+
+    # 底壁：严格在 y1+5pt 之后，跳过少数派块自身的 y1 形成的伪网格线
+    bottom = [y for y in y_lines if y > bbox.y1 + 5]
+    cell_y1 = min(bottom) if bottom else bbox.y1
+
+    # 保证 cell ≥ bbox（不收缩）
+    return fitz.Rect(
+        min(cell_x0, bbox.x0),
+        min(cell_y0, bbox.y0),
+        max(cell_x1, bbox.x1),
+        max(cell_y1, bbox.y1),
+    )
+
+
+def _build_cell_tree(
+    bboxes: List[fitz.Rect],
+    page_rect: fitz.Rect,
+    obstacles: Optional[List[fitz.Rect]] = None,
+) -> List[fitz.Rect]:
+    """
+    ソープバブル膨張（軸平行 Voronoi）によるセル算出。
+
+    各 bbox を上下左右に独立して膨張させ、最近傍 bbox のエッジとの中点で停止。
+    obstacles: 画像ブロック等の障害物。Voronoi の中点計算に参加するが、セルを持たない。
+    """
+    all_rects = list(bboxes) + list(obstacles or [])
+    cells = []
+    for i, b in enumerate(bboxes):
+        others = [all_rects[j] for j in range(len(all_rects)) if j != i]
+
+        # Row-aware Voronoi: x-boundaries only consider obstacles in the same
+        # row-band (y-overlap); y-boundaries only consider same column-band (x-overlap).
+        # This prevents far-away text in other rows from narrowing horizontal cells.
+        Y_TOL = b.height  # one bbox-height of tolerance for row membership
+        X_TOL = b.width
+
+        x0 = page_rect.x0
+        for o in others:
+            if o.x1 <= b.x0 + 0.5:
+                if o.y0 < b.y1 + Y_TOL and o.y1 > b.y0 - Y_TOL:
+                    x0 = max(x0, (o.x1 + b.x0) / 2.0)
+
+        x1 = page_rect.x1
+        for o in others:
+            if o.x0 >= b.x1 - 0.5:
+                if o.y0 < b.y1 + Y_TOL and o.y1 > b.y0 - Y_TOL:
+                    x1 = min(x1, (o.x0 + b.x1) / 2.0)
+
+        y0 = page_rect.y0
+        for o in others:
+            if o.y1 <= b.y0 + 0.5:
+                if o.x0 < b.x1 + X_TOL and o.x1 > b.x0 - X_TOL:
+                    y0 = max(y0, (o.y1 + b.y0) / 2.0)
+
+        y1 = page_rect.y1
+        for o in others:
+            if o.y0 >= b.y1 - 0.5:
+                if o.x0 < b.x1 + X_TOL and o.x1 > b.x0 - X_TOL:
+                    y1 = min(y1, (o.y0 + b.y1) / 2.0)
+
+        cells.append(fitz.Rect(x0, y0, x1, y1))
+    return cells
+
+
+def _cell_insert_bbox(
+    bbox: fitz.Rect,
+    cell: fitz.Rect,
+    align: int,
+) -> fitz.Rect:
+    """
+    cell とオリジナル bbox からレンダリング用 bbox を計算する。
+
+    - 水平: テキストの先頭エッジを原文 bbox のエッジに固定し、
+            反対側はセル境界まで広げる（余白 1pt）。
+      * 左揃え / 中央揃え: x0=bbox.x0  x1=cell.x1-1
+      * 右揃え           : x0=cell.x0+1 x1=bbox.x1
+    - 垂直: 上端を bbox.y0 に固定し、下端はセル境界まで広げる（余白 1pt）。
+
+    返り値は常に原文 bbox 以上のサイズを保証する。
+    """
+    MARGIN = 1.0
+    if align == 2:          # 右揃え
+        x0 = cell.x0 + MARGIN
+        x1 = bbox.x1
+    else:                   # 左揃え / 中央揃え
+        x0 = bbox.x0
+        x1 = cell.x1 - MARGIN
+    y0 = bbox.y0
+    y1 = cell.y1 - MARGIN
+    return fitz.Rect(
+        min(x0, bbox.x0), min(y0, bbox.y0),
+        max(x1, bbox.x1), max(y1, bbox.y1),
+    )
+
+
+def _expand_for_minority(
+    page: fitz.Page,
+    bbox: fitz.Rect,
+    text: str,
+    target_size: float,
+    page_rect: fitz.Rect,
+    other_bboxes: List[fitz.Rect],
+    color: tuple,
+    align: int,
+    fontname: Optional[str] = None,
+    fontfile: Optional[str] = None,
+    cell: Optional[fitz.Rect] = None,
+) -> fitz.Rect:
+    """
+    mapped_size に収まらない少数派ブロックに対して、方向別の bbox 拡張を試みる。
+
+    - bullet テキスト：右 → 下 の順に拡張（リスト縦揃えを保つ）
+    - テーブルセル / caption：cell（グリッドセル境界）内で垂直拡張
+      cell が指定されていない場合は従来の上下対称拡張にフォールバック
+
+    拡張後の bbox で target_size が収まれば返す。収まらなければ cell 矩形
+    （または元の bbox）を返し、insert_text_fitting でのフォント縮小に委ねる。
+    """
+    EDGE = 4.0
+    STEPS_RIGHT = [20, 40, 60, 80, 120, 160, 200]
+    STEPS_DOWN  = [6, 12, 18, 24, 36]
+
+    def no_col(r: fitz.Rect) -> bool:
+        """ページ端 + 他ブロックとの衝突なし"""
+        if r.x0 < EDGE or r.y0 < EDGE:
+            return False
+        if r.x1 > page_rect.width - EDGE or r.y1 > page_rect.height - EDGE:
+            return False
+        for ob in other_bboxes:
+            # 元の bbox と既に重なるブロックは同一セルの兄弟 → スキップ
+            if bbox.intersects(ob):
+                continue
+            if r.intersects(ob):
+                return False
+        return True
+
+    def fits(r: fitz.Rect) -> bool:
+        sz = _get_fitting_size(page, r, text, target_size,
+                               color, align, fontname, fontfile)
+        return sz >= target_size - 0.05
+
+    if _is_bullet(text):
+        # ── 右方向に拡張 ────────────────────────────────────────────
+        best_right = bbox
+        for d in STEPS_RIGHT:
+            cand = fitz.Rect(bbox.x0, bbox.y0,
+                             min(page_rect.width - EDGE, bbox.x1 + d), bbox.y1)
+            if no_col(cand):
+                best_right = cand
+                if fits(cand):
+                    return cand
+            else:
+                break  # 衝突したらそれ以上は試さない
+
+        # ── 下方向に拡張（右拡張後の幅を維持）──────────────────────
+        for d in STEPS_DOWN:
+            cand = fitz.Rect(best_right.x0, best_right.y0,
+                             best_right.x1,
+                             min(page_rect.height - EDGE, bbox.y1 + d))
+            if no_col(cand):
+                if fits(cand):
+                    return cand
+            else:
+                break
+
+    else:
+        # ── テーブルセル / caption：グリッドセル内で垂直拡張 ────────
+        # x 幅は固定（セル境界を越えるリスクを避ける）。
+        # 試みる順序：① 上下一括（cell 全体）→ ② 下方向のみ → ③ 上方向のみ
+        # → ④ 従来の増分ステップ（隣接ブロック間の隙間を狙う）
+        if cell is not None:
+            # ① 上下一括
+            cand = fitz.Rect(
+                bbox.x0,
+                max(EDGE, min(bbox.y0, cell.y0)),
+                bbox.x1,
+                min(page_rect.height - EDGE, max(bbox.y1, cell.y1)),
+            )
+            if no_col(cand):
+                return cand
+            # ② 下方向のみ（cell_y1 まで）：実際に拡張した場合のみ返す
+            cand_down = fitz.Rect(
+                bbox.x0, bbox.y0, bbox.x1,
+                min(page_rect.height - EDGE, max(bbox.y1, cell.y1)),
+            )
+            if no_col(cand_down) and cand_down.height > bbox.height + 0.5:
+                return cand_down
+            # ③ 上方向のみ（cell_y0 まで）：実際に拡張した場合のみ返す
+            cand_up = fitz.Rect(
+                bbox.x0,
+                max(EDGE, min(bbox.y0, cell.y0)),
+                bbox.x1, bbox.y1,
+            )
+            if no_col(cand_up) and cand_up.height > bbox.height + 0.5:
+                return cand_up
+
+        # ④ 増分ステップ（cell 有無を問わず：隣接ブロック間の隙間を逐次探索）
+        STEPS_V = [4, 8, 12, 18, 24, 36, 48, 60, 80]
+        for d in STEPS_V:
+            for cand in [
+                fitz.Rect(bbox.x0, max(EDGE, bbox.y0 - d),
+                          bbox.x1, min(page_rect.height - EDGE, bbox.y1 + d)),
+                fitz.Rect(bbox.x0, max(EDGE, bbox.y0 - d),
+                          bbox.x1, bbox.y1),
+                fitz.Rect(bbox.x0, bbox.y0,
+                          bbox.x1, min(page_rect.height - EDGE, bbox.y1 + d)),
+            ]:
+                if no_col(cand) and fits(cand):
+                    return cand
+
+    return bbox  # 拡張しても収まらない → 元の bbox を返す（shrink に委ねる）
 
 
 def _load_context() -> str:
@@ -720,12 +1116,28 @@ def _call_claude_translate(batch: List[tuple], src_name: str, tgt_name: str,
         if _CONTEXT_CACHE else ""
     )
     prompt = (
-        f"你是一位专业演示文稿翻译。将以下幻灯片文本从 {src_name} 翻译成 {tgt_name}。\n"
-        f"要求：简洁自然，保持幻灯片风格，专业术语准确，换行符（\\n）原样保留。"
+        f"你是一位资深演示文稿本地化专家，具备丰富的企业级幻灯片翻译经验，熟悉技术、商业与工程领域术语。\n\n"
+        f"## 任务\n"
+        f"将以下幻灯片文本从 {src_name} 翻译成 {tgt_name}。\n\n"
+        f"## 翻译规范\n\n"
+        f"**格式保真（最高优先级）**\n"
+        f"- 换行符（\\n）必须原样保留，不得增减\n"
+        f"- 数字、单位、产品型号、代码片段保持原样\n"
+        f"- 项目符号（•、-、▶ 等）及其后的空格保持原样\n\n"
+        f"**术语准确性**\n"
+        f"- 专业术语使用行业标准译名\n"
+        f"- 人名、品牌名、型号等专有名词保持原文\n"
+        f"- 常用缩略词可保留原文（如 AI、ROI、KPI）\n\n"
+        f"**幻灯片语言风格**\n"
+        f"- 简洁精炼，避免冗长；标题类文本尤其要简短有力\n"
+        f"- 自然流畅，符合 {tgt_name} 母语者表达习惯\n"
+        f"- 纯数字、标点、符号构成的文本：原样输出，不翻译\n"
         f"{context_section}\n"
-        f"输入格式：JSON 数组，每个元素有 id 和 text 字段。\n"
-        f"输出格式：仅返回 JSON 数组，结构相同，将每个 text 翻译后原样输出。"
-        f"不要输出任何其他内容，不要 markdown 代码块，仅纯 JSON。\n\n"
+        f"## 输入格式\n"
+        f"JSON 数组，每个元素有 id 和 text 字段。\n\n"
+        f"## 输出格式\n"
+        f"仅返回 JSON 数组，结构相同，将每个 text 替换为对应译文。\n"
+        f"禁止输出任何说明文字、注释或 markdown 代码块，仅纯 JSON。\n\n"
         f"{input_json}"
     )
     try:
@@ -1068,17 +1480,49 @@ def translate_page(page: fitz.Page, src: str, tgt: str,
 
         if lines_are_scattered(block):
             # 各行独立处理：每行用自己的 bbox 和文字
-            for line in block["lines"]:
-                line_text = "".join(_normalize_span_text(span) for span in line["spans"]).strip()
+            # 連続行が文中断 → 次行が小文字開始の場合は結合（センテンス継続検出）
+            scattered_lines = block["lines"]
+            _sl_merged: list = []   # [(merged_text, merged_bbox, first_span)]
+            _si = 0
+            while _si < len(scattered_lines):
+                line = scattered_lines[_si]
+                lt = "".join(_normalize_span_text(s) for s in line["spans"]).strip()
+                merged_text = lt
+                merged_bbox = list(line["bbox"])
+                span0 = line["spans"][0]
+                # 次行が continuation（現行が文末ではなく次行が小文字）なら結合
+                # ただし水平方向に大きく離れている行（別列）は結合しない
+                _si2 = _si + 1
+                while _si2 < len(scattered_lines):
+                    next_line = scattered_lines[_si2]
+                    next_lt = "".join(_normalize_span_text(s) for s in next_line["spans"]).strip()
+                    nb = next_line["bbox"]
+                    # 次行の x0 が現行の x1 より右にあれば別列 → 結合しない
+                    # （同一列の行は x 範囲が重なるか隙間が数 px 以内）
+                    if nb[0] > merged_bbox[2] + 5:
+                        break
+                    if (merged_text and merged_text[-1] not in '.!?\u3002\uff01\uff1f' and
+                            next_lt and next_lt[0].islower()):
+                        merged_text = merged_text.rstrip() + ' ' + next_lt
+                        merged_bbox = [
+                            min(merged_bbox[0], nb[0]), min(merged_bbox[1], nb[1]),
+                            max(merged_bbox[2], nb[2]), max(merged_bbox[3], nb[3]),
+                        ]
+                        _si2 += 1
+                    else:
+                        break
+                _sl_merged.append((merged_text, merged_bbox, span0))
+                _si = _si2
+
+            for (line_text, lbbox, span) in _sl_merged:
                 if not line_text or is_skip_text(line_text):
                     continue
-                span = line["spans"][0]
                 if span["size"] < _MIN_TRANSLATE_FONTSIZE:
                     continue
-                lx0, ly0, lx1, ly1 = line["bbox"]
+                lx0, ly0, lx1, ly1 = lbbox
                 # 给行 bbox 增加少量垂直空间以便文字能放入
                 line_bbox = fitz.Rect(lx0, ly0, lx1, ly1 + span["size"] * 0.5)
-                redact_bboxes.append(fitz.Rect(line["bbox"]))
+                redact_bboxes.append(fitz.Rect(lbbox))
                 insertion_items.append({
                     "bbox": line_bbox,
                     "text": line_text,
@@ -1103,6 +1547,32 @@ def translate_page(page: fitz.Page, src: str, tgt: str,
 
     if not insertion_items:
         return
+
+    # ── 去重：移除被更大邻居块高度重叠（> 70%）的小块 ──────────────────────
+    # 源 PDF 中（尤其 PPT 导出）同一表格单元格有时产生多个几乎完全重叠的 block，
+    # 保留面积最大的那个，丢弃其余（原文仍会被 redact，不会残留）。
+    if len(insertion_items) > 1:
+        _iboxes = [item["bbox"] for item in insertion_items]
+        _keep = [True] * len(insertion_items)
+        for _i in range(len(_iboxes)):
+            if not _keep[_i]:
+                continue
+            for _j in range(_i + 1, len(_iboxes)):
+                if not _keep[_j]:
+                    continue
+                _inter = _iboxes[_i] & _iboxes[_j]
+                if _inter.is_empty:
+                    continue
+                _ai = _iboxes[_i].width * _iboxes[_i].height
+                _aj = _iboxes[_j].width * _iboxes[_j].height
+                _a_inter = _inter.width * _inter.height
+                _min_a = min(_ai, _aj)
+                if _min_a > 0 and _a_inter / _min_a > 0.70:
+                    if _ai <= _aj:
+                        _keep[_i] = False
+                    else:
+                        _keep[_j] = False
+        insertion_items = [item for _i, item in enumerate(insertion_items) if _keep[_i]]
 
     # ── Z-order 预处理：记录各文字块在原始流中的锚点 ─────────────────────────
     # 在 redact 之前读取原始流，找到每个 BT...ET 的位置，作为后续重排的定位锚点。
@@ -1151,9 +1621,111 @@ def translate_page(page: fitz.Page, src: str, tgt: str,
         except Exception:
             font_name = None
 
+    # ── 隣接同列ブロックマージ：PyMuPDF が1つのテーブルセルを複数ブロックに
+    # 分割した場合、縦に隣接かつ x が大きく重なるアイテムを1つに統合する。
+    # 典型例: "UNP CUTIN Collision Risk"（y=317-329）と "Takeover Filter"
+    # （y=330-342）が同じ列で別ブロックになる場合。
+    _MERGE_Y_GAP   = 6.0   # px: この gap 以内を「隣接」とみなす
+    _MERGE_X_RATIO = 0.30  # x 重複率がこれ以上なら同一列とみなす
+    _new_items: list = []
+    _new_trans: list = []
+    _mi = 0
+    while _mi < len(insertion_items):
+        _item = insertion_items[_mi]
+        _t    = translations[_mi]
+        while _mi + 1 < len(insertion_items):
+            _ni = insertion_items[_mi + 1]
+            _nt = translations[_mi + 1]
+            if not _t or not _nt:
+                break
+            _ygap = _ni["bbox"].y0 - _item["bbox"].y1
+            if _ygap < 0 or _ygap > _MERGE_Y_GAP:
+                break
+            _xlo  = max(_item["bbox"].x0, _ni["bbox"].x0)
+            _xhi  = min(_item["bbox"].x1, _ni["bbox"].x1)
+            _xuni = max(_item["bbox"].x1, _ni["bbox"].x1) - min(_item["bbox"].x0, _ni["bbox"].x0)
+            if _xuni <= 0 or (_xhi - _xlo) / _xuni < _MERGE_X_RATIO:
+                break
+            # マージ実行
+            _merged_bbox = fitz.Rect(
+                min(_item["bbox"].x0, _ni["bbox"].x0), _item["bbox"].y0,
+                max(_item["bbox"].x1, _ni["bbox"].x1), _ni["bbox"].y1,
+            )
+            _item = dict(_item)
+            _item["bbox"] = _merged_bbox
+            _t = _t.rstrip('\n') + '\n' + _nt.lstrip('\n')
+            _mi += 1
+        _new_items.append(_item)
+        _new_trans.append(_t)
+        _mi += 1
+    insertion_items = _new_items
+    translations    = _new_trans
+
     # ── 插入译文：弹性 bbox + Shape dry-run 精确适配字号 ──────────
     # 预建所有插入项的 bbox 列表，供碰撞检测使用
     all_insert_bboxes = [item["bbox"] for item in insertion_items]
+
+    # ── 隐式网格检测：BSP 递归 guillotine 分割，为每个 block 分配唯一 cell ──
+    # 画像ブロックを障害物として収集（Voronoi 境界として機能）
+    # get_image_info() でページ上の全画像 bbox を取得（text_dict には含まれない）
+    _img_obstacles: List[fitz.Rect] = []
+    try:
+        for _info in page.get_image_info(hashes=False, xrefs=False):
+            _r = fitz.Rect(_info["bbox"])
+            if _r.width > 30 and _r.height > 30:
+                _img_obstacles.append(_r)
+    except Exception:
+        pass
+
+    # テーブルセル検出（PyMuPDF 1.23+）→ コンテナとして使用
+    _table_cells: List[fitz.Rect] = []
+    try:
+        for _tbl in page.find_tables().tables:
+            for _row in _tbl.cells:
+                for _cell in _row:
+                    if _cell is not None:
+                        _cr = fitz.Rect(_cell)
+                        if _cr.width > 5 and _cr.height > 5:
+                            _table_cells.append(_cr)
+    except Exception:
+        pass
+
+    _item_cells_raw = _build_cell_tree(all_insert_bboxes, page_rect, obstacles=_img_obstacles)
+
+    # Voronoi セルをコンテナ（テーブルセル）で clip
+    _item_cells = []
+    for _idx, (_cell, _bbox) in enumerate(zip(_item_cells_raw, all_insert_bboxes)):
+        _container = None
+        for _tc in _table_cells:
+            if (_tc.x0 <= _bbox.x0 + 2 and _bbox.x1 <= _tc.x1 + 2 and
+                    _tc.y0 <= _bbox.y0 + 2 and _bbox.y1 <= _tc.y1 + 2):
+                if _container is None or (_tc.width * _tc.height < _container.width * _container.height):
+                    _container = _tc
+        if _container is not None:
+            # clip: intersect Voronoi cell with container (with 1pt margin)
+            clipped = fitz.Rect(
+                max(_cell.x0, _container.x0 + 1),
+                max(_cell.y0, _container.y0 + 1),
+                min(_cell.x1, _container.x1 - 1),
+                min(_cell.y1, _container.y1 - 1),
+            )
+            # ensure not smaller than bbox
+            _item_cells.append(fitz.Rect(
+                min(clipped.x0, _bbox.x0),
+                min(clipped.y0, _bbox.y0),
+                max(clipped.x1, _bbox.x1),
+                max(clipped.y1, _bbox.y1),
+            ))
+        else:
+            _item_cells.append(_cell)
+
+    # ── bbox.y0 を行単位でスナップ（同一行の微小ズレを投票で補正）──────────
+    _y0_centers = _cluster([b.y0 for b in all_insert_bboxes], tol=4.0, min_count=1)
+    def _snap_y0(y: float) -> float:
+        if not _y0_centers:
+            return y
+        nearest = min(_y0_centers, key=lambda c: abs(c - y))
+        return nearest if abs(nearest - y) <= 4.0 else y
 
     # 检测标题块：页面上方 25% 内字号最大的文本块，或页面任意位置字号 ≥ 40pt 的大字
     # 标题处理：强制单行 + bbox 扩展至页面宽度（避免碰撞限制导致过度缩小）
@@ -1166,36 +1738,128 @@ def translate_page(page: fitz.Page, src: str, tgt: str,
              or item["font_size"] >= 40)
     }
 
+    # ── Phase 1: bullet 替换 + 预计算 insert_bbox（供 dry-run 和渲染共用）──
+    translated_texts: List[str] = []
+    insert_bboxes: List[fitz.Rect] = []
     for idx, (item, translated) in enumerate(zip(insertion_items, translations)):
+        # Hiragino に収録されていないグリフを近似文字に置換
+        translated = translated.replace('\u25B8', '\u25B6').replace('\u25BA', '\u25B6')  # ▸►→▶
+        translated = translated.replace('\u2705', '\u2713')  # ✅→✓ (emoji→Hiragino対応)
+        translated = translated.replace('\u0394', '\u25B3').replace('\u03B4', '\u25B3')  # Δδ→△
+        # bullet 后的空白（包括换行）→ 非换行空格，防止 PyMuPDF 在 bullet 后断行
+        translated = re.sub(r'([•§·▪▸►▶◆◇○●✓])[\s\n]+', lambda m: m.group(1) + '\xa0', translated)
+        # 専有名詞（英字語）+ スペース + CJK → \xa0 で改行防止（例: Honda チーム、Box + DFDI）
+        translated = re.sub(
+            r'([A-Za-z0-9])(\s+)(?=[\u3040-\u30FF\u4E00-\u9FFF])',
+            lambda m: m.group(1) + '\xa0',
+            translated,
+        )
+        # 英字語 + スペース + [+\-/] + スペース → \xa0（例: Box\xa0+\xa0DFDI）
+        translated = re.sub(
+            r'([A-Za-z0-9])\s+([+\-/])\s+([A-Za-z0-9])',
+            lambda m: m.group(1) + '\xa0' + m.group(2) + '\xa0' + m.group(3),
+            translated,
+        )
+        # 各行頭スペースを除去（LLM が行頭に空白を出力・原文インデントを引き継ぐことがある）
+        translated = '\n'.join(line.lstrip(' ') for line in translated.split('\n'))
+        translated_texts.append(translated)
+        if not translated:
+            insert_bboxes.append(item["bbox"])
+            continue
+        # y0 を同行グループ内でスナップ（表ヘッダー等の高さ揃え）
+        snapped_y0 = _snap_y0(item["bbox"].y0)
+        snap_bbox = fitz.Rect(item["bbox"].x0, snapped_y0,
+                              item["bbox"].x1, item["bbox"].y1)
+        if idx in title_indices:
+            title_y1 = max(snap_bbox.y1,
+                           snap_bbox.y0 + item["font_size"] * _LINE_HEIGHT_FACTOR * 2)
+            insert_bboxes.append(fitz.Rect(snap_bbox.x0, snap_bbox.y0,
+                                           page_rect.width - 2, title_y1))
+        else:
+            ibx = _cell_insert_bbox(snap_bbox, _item_cells[idx], item["align"])
+            # 画像障害物が insert_bbox の右側に重なる場合、x1 をクリップして画像へのはみ出しを防ぐ
+            for _obs in _img_obstacles:
+                if (ibx.x1 > _obs.x0 + 5 and ibx.x0 < _obs.x1
+                        and ibx.y1 > _obs.y0 and ibx.y0 < _obs.y1
+                        and _obs.x0 > ibx.x0 + 10):
+                    ibx = fitz.Rect(ibx.x0, ibx.y0, min(ibx.x1, _obs.x0 - 2), ibx.y1)
+            insert_bboxes.append(ibx)
+
+    # 跨文本框续行检测：译文以助词開始 → 前フレームにマージ（字号も継承）
+    _JA_PARTICLES = re.compile(r'^[のがをはでにへともやかなどからまでけどより]')
+    for _i in range(1, len(translated_texts)):
+        # タイトルブロックはマージ対象から除外（例：「まとめ：…」で始まるタイトルが前フレームに吸収されるのを防ぐ）
+        if _i in title_indices or (_i - 1) in title_indices:
+            continue
+        if translated_texts[_i] and _JA_PARTICLES.match(translated_texts[_i].lstrip()):
+            prev_item = insertion_items[_i - 1]
+            curr_item = insertion_items[_i]
+            v_gap = curr_item["bbox"].y0 - prev_item["bbox"].y1
+            # 垂直距離が 2 行以内の場合は前フレームにマージして重複表示を防ぐ
+            if v_gap < prev_item["font_size"] * 2.5 and translated_texts[_i - 1]:
+                translated_texts[_i - 1] = (translated_texts[_i - 1].rstrip()
+                                             + translated_texts[_i].lstrip())
+                translated_texts[_i] = ""
+                # 前フレームの insert_bbox を縦方向に拡張して current 分をカバー
+                prev_ibx = insert_bboxes[_i - 1]
+                curr_ibx = insert_bboxes[_i]
+                insert_bboxes[_i - 1] = fitz.Rect(
+                    prev_ibx.x0, prev_ibx.y0,
+                    max(prev_ibx.x1, curr_ibx.x1),
+                    max(prev_ibx.y1, curr_ibx.y1),
+                )
+            # Always inherit font size from previous item
+            insertion_items[_i] = dict(insertion_items[_i])
+            insertion_items[_i]["font_size"] = insertion_items[_i - 1]["font_size"]
+
+    # ── Phase 2: per-item binary-search fitting size ─────────────────────
+    from collections import defaultdict as _defaultdict
+    fitting_sizes: List[float] = []
+    for idx, (item, translated, ibbox) in enumerate(
+            zip(insertion_items, translated_texts, insert_bboxes)):
+        if not translated or idx in title_indices:
+            fitting_sizes.append(item["font_size"])
+            continue
+        fs = _find_fitting_size(
+            page, ibbox, translated, item["font_size"],
+            item["color"], item["align"],
+            fontname=font_name,
+            min_size=max(4.0, item["font_size"] * 0.4),
+        )
+        fitting_sizes.append(fs)
+
+    # Consistency pass: 80th-percentile cap per source_size group
+    _samples: dict = _defaultdict(list)
+    for idx, item in enumerate(insertion_items):
+        if idx not in title_indices and translated_texts[idx]:
+            _samples[item["font_size"]].append(fitting_sizes[idx])
+    consistent_size: dict = {}
+    for src_size, sizes in _samples.items():
+        if len(sizes) < 3:
+            consistent_size[src_size] = src_size
+            continue
+        sorted_desc = sorted(sizes, reverse=True)
+        k = min(len(sorted_desc) - 1, max(0, int(len(sorted_desc) * 0.2)))
+        consistent_size[src_size] = round(sorted_desc[k], 2)
+
+    # ── Phase 3: render at min(fitting_size, consistent_size) ────────────
+    for idx, (item, translated, insert_bbox) in enumerate(
+            zip(insertion_items, translated_texts, insert_bboxes)):
         if not translated:
             continue
-
-        # bullet 后的空白（包括换行）→ 非换行空格，防止 PyMuPDF 在 bullet 后断行
-        translated = re.sub(r'([•§·▪▸►▶◆◇○●])[\s\n]+', lambda m: m.group(1) + '\xa0', translated)
-
         if idx in title_indices:
-            # 标题/大字：强制单行 + 扩展至页面宽度
-            # y1 同时保证不小于原字号一行高度，避免"小 bbox"路径强制缩减字号
             translated = translated.replace('\n', ' ').strip()
-            title_y1 = max(item["bbox"].y1,
-                           item["bbox"].y0 + item["font_size"] * _LINE_HEIGHT_FACTOR * 2)
-            insert_bbox = fitz.Rect(item["bbox"].x0, item["bbox"].y0,
-                                    page_rect.width - 2, title_y1)
+            render_size = item["font_size"]
         else:
-            other_bboxes = [b for i, b in enumerate(all_insert_bboxes) if i != idx]
-            insert_bbox = try_expand_bbox(
-                item["bbox"], translated.strip(), item["font_size"],
-                page_rect, other_bboxes,
-                orig_pixmap=orig_pixmap,
-            )
-        min_factor = 0.4
+            cons = consistent_size.get(item["font_size"], item["font_size"])
+            render_size = min(fitting_sizes[idx], cons)
 
         insert_text_fitting(
-            page, insert_bbox, translated, item["font_size"],
+            page, insert_bbox, translated, render_size,
             color=item["color"], align=item["align"],
             fontname=font_name,
             fontfile=cjk_font,
-            min_factor=min_factor,
+            min_factor=0.4,
         )
 
     # ── Z-order 重排（暂时禁用，safe-Q-snap 方案在复杂页面效果不佳）────────────
@@ -1310,6 +1974,100 @@ def translate_pdf(input_path: str, output_path: str,
         doc.close()
 
 
+def _text_similarity(a: str, b: str) -> float:
+    """Jaccard similarity on character 4-grams."""
+    def ngrams(s: str, n: int = 4):
+        return set(s[i:i + n] for i in range(len(s) - n + 1))
+    a_ng = ngrams(a)
+    b_ng = ngrams(b)
+    if not a_ng or not b_ng:
+        return 0.0
+    return len(a_ng & b_ng) / len(a_ng | b_ng)
+
+
+def apply_page_copy_from_reference(
+        output_path: str,
+        src_path: str,
+        ref_src_path: str,
+        ref_output_path: str,
+        similarity_threshold: float = 0.75,
+        verbose: bool = True) -> None:
+    """
+    出力 PDF のページを参照出力 PDF（既に翻訳済み）の対応ページで置き換える。
+    ページの一致判定はソース PDF 同士のテキスト類似度で行う。
+    これにより、成果物3 内の成果物1 重複ページを再レンダリングせず高品質版で代替できる。
+    """
+    if not os.path.exists(ref_output_path) or not os.path.exists(ref_src_path):
+        if verbose:
+            print(f"⚠ 参照ファイルが見つかりません: {ref_src_path} / {ref_output_path}")
+        return
+
+    def page_fingerprint(page) -> str:
+        text = page.get_text("text")
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text[:400]
+
+    src_doc = fitz.open(src_path)
+    ref_src_doc = fitz.open(ref_src_path)
+
+    ref_fingerprints = {i: page_fingerprint(p) for i, p in enumerate(ref_src_doc)
+                        if page_fingerprint(p)}
+
+    page_map: dict = {}
+    for i, page in enumerate(src_doc):
+        fp = page_fingerprint(page)
+        if not fp:
+            continue
+        best_sim, best_ref = 0.0, -1
+        for ref_idx, ref_fp in ref_fingerprints.items():
+            sim = _text_similarity(fp, ref_fp)
+            if sim > best_sim:
+                best_sim, best_ref = sim, ref_idx
+        if best_sim >= similarity_threshold:
+            page_map[i] = best_ref
+
+    src_doc.close()
+    ref_src_doc.close()
+
+    if not page_map:
+        if verbose:
+            print("  参照ページとの一致なし（置き換え不要）")
+        return
+
+    if verbose:
+        for out_idx, ref_idx in sorted(page_map.items()):
+            print(f"  ページ {out_idx + 1} → 参照ページ {ref_idx + 1} で置き換え")
+
+    out_doc = fitz.open(output_path)
+    ref_out_doc = fitz.open(ref_output_path)
+
+    # 後ろから処理してインデックスのズレを防ぐ
+    for out_idx in sorted(page_map.keys(), reverse=True):
+        ref_idx = page_map[out_idx]
+        if out_idx < len(out_doc) and ref_idx < len(ref_out_doc):
+            out_doc.delete_page(out_idx)
+            out_doc.insert_pdf(ref_out_doc, from_page=ref_idx, to_page=ref_idx,
+                               start_at=out_idx)
+
+    import tempfile
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(tmp_fd)
+    try:
+        out_doc.save(tmp_path, garbage=4, deflate=True, clean=True)
+        ref_out_doc.close()
+        out_doc.close()
+        os.replace(tmp_path, output_path)
+    except Exception:
+        ref_out_doc.close()
+        out_doc.close()
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+    if verbose:
+        print(f"✅ 参照ページ置き換え完了（{len(page_map)} ページ）")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="PDF 翻译工具 - 保留排版，使用 Claude Code 账号（无需额外 API Key）",
@@ -1332,6 +2090,10 @@ def main():
     parser.add_argument("-q", "--quiet", action="store_true", help="安静模式")
     parser.add_argument("--pages", default=None,
                         help="翻译指定页（1-based），如 1 或 1,3 或 2-5")
+    parser.add_argument("--ref-src", default=None,
+                        help="参照源 PDF（成果物1 等）：用于置换重复页")
+    parser.add_argument("--ref-output", default=None,
+                        help="参照输出 PDF（成果物1_ja 等）：重复页的高质量版本")
 
     args = parser.parse_args()
 
@@ -1360,6 +2122,15 @@ def main():
         verbose=not args.quiet,
         pages=pages,
     )
+
+    if args.ref_src and args.ref_output:
+        apply_page_copy_from_reference(
+            output_path=args.output,
+            src_path=args.input,
+            ref_src_path=args.ref_src,
+            ref_output_path=args.ref_output,
+            verbose=not args.quiet,
+        )
 
 
 if __name__ == "__main__":

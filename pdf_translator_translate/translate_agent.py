@@ -14,6 +14,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Allow importing contracts/validate.py from any working directory
+_CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
+if str(_CONTRACTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_CONTRACTS_DIR.parent))
+
 SUPPORTED_LANGUAGES = {
     "en": "English",
     "ja": "日本語",
@@ -60,12 +65,28 @@ def _call_claude_translate(
         context_block = f"\n参考术语与背景知识：\n{context_section}\n"
 
     prompt = (
-        f"你是一位专业演示文稿翻译。将以下幻灯片文本从 {src_name} 翻译成 {tgt_name}。\n"
-        "要求：简洁自然，保持幻灯片风格，专业术语准确，换行符（\\n）原样保留。\n"
-        f"{context_block}"
-        "输入格式：JSON 数组，每个元素有 id 和 text 字段。\n"
-        "输出格式：仅返回 JSON 数组，结构相同，将每个 text 翻译后原样输出。\n"
-        "不要输出任何其他内容，不要 markdown 代码块，仅纯 JSON。\n\n"
+        f"你是一位资深演示文稿本地化专家，具备丰富的企业级幻灯片翻译经验，熟悉技术、商业与工程领域术语。\n\n"
+        f"## 任务\n"
+        f"将以下幻灯片文本从 {src_name} 翻译成 {tgt_name}。\n\n"
+        f"## 翻译规范\n\n"
+        f"**格式保真（最高优先级）**\n"
+        f"- 换行符（\\n）必须原样保留，不得增减\n"
+        f"- 数字、单位、产品型号、代码片段保持原样\n"
+        f"- 项目符号（•、-、▶ 等）及其后的空格保持原样\n\n"
+        f"**术语准确性**\n"
+        f"- 专业术语使用行业标准译名\n"
+        f"- 人名、品牌名、型号等专有名词保持原文\n"
+        f"- 常用缩略词可保留原文（如 AI、ROI、KPI）\n\n"
+        f"**幻灯片语言风格**\n"
+        f"- 简洁精炼，避免冗长；标题类文本尤其要简短有力\n"
+        f"- 自然流畅，符合 {tgt_name} 母语者表达习惯\n"
+        f"- 纯数字、标点、符号构成的文本：原样输出，不翻译\n"
+        f"{context_block}\n"
+        f"## 输入格式\n"
+        f"JSON 数组，每个元素有 id 和 text 字段。\n\n"
+        f"## 输出格式\n"
+        f"仅返回 JSON 数组，结构相同，将每个 text 替换为对应译文。\n"
+        f"禁止输出任何说明文字、注释或 markdown 代码块，仅纯 JSON。\n\n"
         f"{input_json}"
     )
 
@@ -251,6 +272,10 @@ def main():
     print(f"Translating {args.src} -> {args.tgt} (batch size: {args.batch})")
     print()
 
+    # Ensure top-level version field
+    if isinstance(data, dict) and "version" not in data:
+        data["version"] = "1.0"
+
     # Process page by page
     for page_idx, page in enumerate(pages):
         blocks = page.get("blocks", [])
@@ -272,8 +297,15 @@ def main():
             claude_cli=claude_cli,
         )
 
-        for block, translated in zip(blocks, translated_texts):
-            block["translated"] = translated
+        for block, translated_text in zip(blocks, translated_texts):
+            # Guarantee `translated` is always a string, even on failure
+            block["translated"] = translated_text if isinstance(translated_text, str) else ""
+
+    # Ensure every block that was not processed also has a `translated` field
+    for page in pages:
+        for block in page.get("blocks", []):
+            if "translated" not in block:
+                block["translated"] = ""
 
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,16 +315,68 @@ def main():
     print()
     print(f"Done. Written to: {output_path}")
 
-    # Verify completeness
-    missing = 0
+    # Verify completeness (count empty translated fields)
+    empty_translated = 0
     for page in pages:
         for block in page.get("blocks", []):
-            if not block.get("translated"):
-                missing += 1
-    if missing:
-        print(f"Warning: {missing} block(s) have empty translated fields.", file=sys.stderr)
+            if block.get("translated") == "":
+                empty_translated += 1
+    if empty_translated:
+        print(f"Warning: {empty_translated} block(s) have empty translated fields.", file=sys.stderr)
     else:
-        print(f"All blocks translated successfully.")
+        print("All blocks translated successfully.")
+
+    # --- Contract validation ---
+    print()
+    print("Validating output against translated.schema.json ...")
+    validation_ok = True
+    validation_messages = []
+
+    try:
+        from contracts.validate import validate_output  # type: ignore
+
+        # translated.schema.json refs parsed.schema.json via $ref (cross-file, treated as valid).
+        # We validate the parsed structure manually, then check the block extension.
+        violations = validate_output(data, "parsed")
+
+        # Additionally check that every block has a `translated` field (string)
+        for page in pages:
+            for block in page.get("blocks", []):
+                bid = block.get("id", "<unknown>")
+                if "translated" not in block:
+                    violations.append(f"block {bid}: missing required field 'translated'")
+                elif not isinstance(block["translated"], str):
+                    violations.append(
+                        f"block {bid}: 'translated' must be a string, "
+                        f"got {type(block['translated']).__name__}"
+                    )
+
+        if violations:
+            validation_ok = False
+            for v in violations:
+                validation_messages.append(f"  VIOLATION: {v}")
+        else:
+            validation_messages.append("  All checks passed.")
+
+    except ImportError as exc:
+        validation_ok = False
+        validation_messages.append(f"  WARNING: could not import validate.py — {exc}")
+    except Exception as exc:  # pragma: no cover
+        validation_ok = False
+        validation_messages.append(f"  WARNING: validation raised an unexpected error — {exc}")
+
+    # Print validation summary
+    print()
+    print("=" * 60)
+    print("VALIDATION SUMMARY")
+    print("=" * 60)
+    if validation_ok:
+        print("STATUS: VALID")
+    else:
+        print("STATUS: INVALID (see warnings above — output was still written)")
+    for msg in validation_messages:
+        print(msg)
+    print("=" * 60)
 
 
 if __name__ == "__main__":

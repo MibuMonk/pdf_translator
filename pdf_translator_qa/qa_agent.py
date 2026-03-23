@@ -76,6 +76,7 @@ def _check_block(page_num: int, block_id: str, block: dict) -> list[dict]:
             "page":       page_num,
             "block_id":   block_id,
             "type":       "missing_translation",
+            "severity":   "critical",
             "text":       text,
             "translated": translated,
         })
@@ -91,6 +92,7 @@ def _check_block(page_num: int, block_id: str, block: dict) -> list[dict]:
             "page":       page_num,
             "block_id":   block_id,
             "type":       "unchanged_translation",
+            "severity":   "warning",
             "text":       text,
             "translated": translated,
         })
@@ -101,6 +103,7 @@ def _check_block(page_num: int, block_id: str, block: dict) -> list[dict]:
             "page":       page_num,
             "block_id":   block_id,
             "type":       "likely_truncated",
+            "severity":   "warning",
             "text":       text,
             "translated": translated,
         })
@@ -111,6 +114,7 @@ def _check_block(page_num: int, block_id: str, block: dict) -> list[dict]:
             "page":       page_num,
             "block_id":   block_id,
             "type":       "suspiciously_short",
+            "severity":   "warning",
             "text":       text,
             "translated": translated,
         })
@@ -199,7 +203,8 @@ def run_qa(json_path: str) -> tuple[dict, list[dict]]:
         "total_blocks":      total_blocks,
         "translated_blocks": translated_blocks,
         "coverage_pct":      coverage_pct,
-        "issues":            len(all_issues),
+        "issue_count":       len(all_issues),
+        "pass":              coverage_pct >= 95,
         "per_page":          per_page_stats,
     }
 
@@ -277,7 +282,7 @@ def main() -> None:
     cov = summary["coverage_pct"]
     total   = summary["total_blocks"]
     xlated  = summary["translated_blocks"]
-    n_issues = summary["issues"]
+    n_issues = summary["issue_count"]
 
     print(bold("\nSummary:"))
     cov_line = f"  Coverage : {xlated}/{total} blocks  ({cov}%)"
@@ -318,14 +323,40 @@ def main() -> None:
     # 6. Write report
     # Remove per_page from top-level summary in the report (keep it clean)
     report_summary = {k: v for k, v in summary.items() if k != "per_page"}
+
+    # Build self_eval
+    retry_candidates = [iss["block_id"] for iss in issues if iss.get("severity") == "critical"]
+    confidence = 1.0 if cov >= 95 else round(cov / 100, 4)
+    self_eval = {
+        "retry_candidates": retry_candidates,
+        "confidence":       confidence,
+    }
+
     report = {
-        "summary": report_summary,
-        "issues":  issues,
+        "version":  "1.0",
+        "summary":  report_summary,
+        "issues":   issues,
+        "self_eval": self_eval,
     }
     out_path = args.output
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     print(bold(f"\nReport written to: {out_path}"))
+
+    # 6b. Validate output against schema
+    try:
+        _contracts_dir = Path(__file__).parent.parent / "contracts"
+        sys.path.insert(0, str(_contracts_dir.parent))
+        from contracts.validate import validate_output
+        violations = validate_output(report, "qa_report")
+        if violations:
+            print(yellow(f"  [warn] Schema validation failed ({len(violations)} violation(s)):"))
+            for v in violations:
+                print(yellow(f"    {v}"))
+        else:
+            print(green("  [ok] Report passed schema validation"))
+    except Exception as exc:
+        print(yellow(f"  [warn] Could not run schema validation: {exc}"))
 
     # 7. Exit code
     if cov >= 95:

@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "parsed.schema.json",
+  "description": "Output of parse_agent and consolidator. Single source of truth for block structure.",
+  "type": "object",
+  "required": ["version", "input_pdf", "source_lang", "target_lang", "pages"],
+  "properties": {
+    "version":      { "type": "string" },
+    "input_pdf":    { "type": "string", "description": "Absolute path to source PDF" },
+    "source_lang":  { "type": "string", "description": "BCP-47 language code, e.g. 'en'" },
+    "target_lang":  { "type": "string" },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_num", "width", "height", "blocks"],
+        "properties": {
+          "page_num":        { "type": "integer", "minimum": 1 },
+          "width":           { "type": "number" },
+          "height":          { "type": "number" },
+          "image_obstacles": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/bbox" }
+          },
+          "blocks": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/block" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bbox": {
+      "type": "array",
+      "description": "[x0, y0, x1, y1] in PDF points",
+      "items": { "type": "number" },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "block": {
+      "type": "object",
+      "required": ["id", "text", "font_size", "color", "align", "bbox", "redact_bboxes"],
+      "properties": {
+        "id":           { "type": "string", "pattern": "^p[0-9]+_b[0-9]+$" },
+        "text":         { "type": "string" },
+        "font_size":    { "type": "number", "minimum": 0 },
+        "color":        {
+          "type": "array",
+          "description": "RGB, each value 0.0–1.0",
+          "items": { "type": "number", "minimum": 0, "maximum": 1 },
+          "minItems": 3, "maxItems": 3
+        },
+        "align":        { "type": "integer", "enum": [0, 1, 2], "description": "0=left 1=center 2=right" },
+        "bbox":         { "$ref": "#/$defs/bbox" },
+        "redact_bboxes":{ "type": "array", "items": { "$ref": "#/$defs/bbox" } },
+        "stream_rank":  { "type": "integer" }
+      }
+    }
+  }
+}
