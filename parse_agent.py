@@ -85,18 +85,30 @@ def is_watermark_block(block: dict) -> bool:
     return False
 
 
-def is_hidden_by_drawing(block_bbox_tuple: tuple, drawings: list) -> bool:
+def is_hidden_by_drawing(block_bbox_tuple: tuple, drawings: list, page_area: float) -> bool:
     """
-    ブロックの bbox が塗り潰し矩形（colored rectangle）に完全に覆われているか判定する。
-    page.get_drawings() の結果を受け取り、fill 色を持つ矩形との包含関係をチェックする。
+    ブロックの bbox が暗色の塗り潰し矩形に完全に覆われているか判定する。
+
+    除外条件（= 隠しとみなさない）:
+    - fill が白/薄色 (全成分 > 0.85)
+    - 矩形がページ面積の 30% 超（スライド背景）
     """
     bx0, by0, bx1, by1 = block_bbox_tuple
     for d in drawings:
-        if d.get("fill") is None:
+        fill = d.get("fill")
+        if fill is None:
             continue
         r = d.get("rect")
         if r is None:
             continue
+        # ページ面積の 30% 超 → スライド背景, スキップ
+        rect_area = (r.x1 - r.x0) * (r.y1 - r.y0)
+        if page_area > 0 and rect_area / page_area > 0.30:
+            continue
+        # 薄色（ほぼ白）背景 → テキストは読める, スキップ
+        if isinstance(fill, (tuple, list)) and len(fill) >= 3:
+            if all(c > 0.85 for c in fill[:3]):
+                continue
         # 矩形が block_bbox を完全に覆っているか（1px 余裕）
         if r.x0 <= bx0 + 1 and r.y0 <= by0 + 1 and r.x1 >= bx1 - 1 and r.y1 >= by1 - 1:
             return True
@@ -232,8 +244,9 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
 
         block_bbox_tuple = block["bbox"]  # (x0, y0, x1, y1)
 
-        # 隠しブロック（色付き矩形に完全に覆われている）
-        if is_hidden_by_drawing(block_bbox_tuple, drawings):
+        # 隠しブロック（暗色矩形に完全に覆われている）
+        page_area = page_rect.width * page_rect.height
+        if is_hidden_by_drawing(block_bbox_tuple, drawings, page_area):
             continue
 
         # テキスト結合（bullet-only 行のマージを含む）
