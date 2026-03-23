@@ -1,0 +1,80 @@
+{
+  "version": "1.0",
+  "issues": [
+    {
+      "id": "ISS-001",
+      "title": "标题块字号在翻译后过小",
+      "description": "含大量英文的标题翻译为中文后，layout_agent 的 font fitting 将字号缩得过小，视觉上从主标题降级为副标题级别。源文件中字号约 24pt，输出后明显偏小。",
+      "severity": "P2",
+      "status": "open",
+      "affected_files": ["成果物4"],
+      "affected_pages": [2, 3, 4],
+      "discovered": "2026-03-23",
+      "fix_commit": null,
+      "detection": {
+        "method": "font_size_ratio",
+        "description": "检查 output.pdf 中标题块（stream_rank=0 或 bbox.y < 100）的字号，与 translated.json 中记录的 font_size 对比，若实际渲染字号 < 原始字号 * 0.7 则判定问题存在"
+      }
+    },
+    {
+      "id": "ISS-002",
+      "title": "背景图被 redact box 覆盖",
+      "description": "layout_agent 在涂白原文时，redact 区域盖住了页面背景图。",
+      "severity": "P2",
+      "status": "fixed",
+      "affected_files": ["成果物4"],
+      "affected_pages": [],
+      "discovered": "2026-03-22",
+      "fix_commit": "80269bc",
+      "detection": {
+        "method": "manual",
+        "description": "目前无自动检测方案，依赖人工对比"
+      }
+    },
+    {
+      "id": "ISS-003",
+      "title": "表格单元格 bbox 消失",
+      "description": "含表格的页面渲染后，表格边框/单元格轮廓丢失。",
+      "severity": "P2",
+      "status": "fixed",
+      "affected_files": ["成果物3"],
+      "affected_pages": [],
+      "discovered": "2026-03-22",
+      "fix_commit": "80269bc",
+      "detection": {
+        "method": "manual",
+        "description": "目前无自动检测方案，依赖人工对比"
+      }
+    },
+    {
+      "id": "ISS-004",
+      "title": "并排兄弟块字号不一致",
+      "description": "同一页中并排的同级文本块，翻译后字号不同，视觉上不对齐。",
+      "severity": "P3",
+      "status": "fixed",
+      "affected_files": ["成果物4"],
+      "affected_pages": [],
+      "discovered": "2026-03-22",
+      "fix_commit": "80269bc",
+      "detection": {
+        "method": "sibling_font_size",
+        "description": "检查同页中 y 坐标相近（差值 < 20pt）的多个文本块，若字号差异 > 20% 则标记"
+      }
+    },
+    {
+      "id": "ISS-005",
+      "title": "正文被提升为标题字体/颜色",
+      "description": "visual_agent 的颜色/字体决策将正文块错误地赋予标题样式。",
+      "severity": "P3",
+      "status": "fixed",
+      "affected_files": ["成果物4"],
+      "affected_pages": [],
+      "discovered": "2026-03-22",
+      "fix_commit": "80269bc",
+      "detection": {
+        "method": "manual",
+        "description": "目前无自动检测方案，依赖人工对比"
+      }
+    }
+  ]
+}

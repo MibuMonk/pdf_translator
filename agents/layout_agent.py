@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -26,7 +27,7 @@ from topology_agent import TopologyAnalyzer    # noqa: E402
 # Constants
 # ---------------------------------------------------------------------------
 
-_LINE_HEIGHT_FACTOR = 1.4
+_LINE_HEIGHT_FACTOR = 1.2
 _MARGIN = 1.0
 _Y_GAP_MERGE = 6.0       # pixels — adjacent block merge threshold
 _X_OVERLAP_RATIO = 0.30  # 30% x-overlap for adjacent merge
@@ -196,18 +197,39 @@ def _find_fitting_size(
 
     fn = fontname or "helv"
 
+    if _has_cjk(text):
+        # insert_textbox with "helv" cannot measure CJK — use em-width estimation instead
+        em_w = estimate_em_width(text)
+        lo, hi = min_size, base_size
+        result = min_size
+        for _ in range(10):
+            mid = (lo + hi) / 2.0
+            if mid < 0.5:
+                break
+            chars_per_line = bbox.width / mid  # 1 em = font_size px wide
+            lines_needed = math.ceil(em_w / chars_per_line) if chars_per_line > 0 else 999
+            if lines_needed == 1:
+                height_needed = mid  # single line: no inter-line spacing
+            else:
+                height_needed = lines_needed * mid * _LINE_HEIGHT_FACTOR
+            if height_needed <= bbox.height and bbox.width >= mid:
+                result = mid
+                lo = mid
+            else:
+                hi = mid
+        return result
+
     # ASCII pre-check at base_size
-    if not _has_cjk(text):
-        shape = page.new_shape()
-        rc = shape.insert_textbox(
-            bbox, text,
-            fontsize=base_size,
-            fontname=fn,
-            align=align,
-            lineheight=_LINE_HEIGHT_FACTOR,
-        )
-        if rc >= 0:
-            return base_size
+    shape = page.new_shape()
+    rc = shape.insert_textbox(
+        bbox, text,
+        fontsize=base_size,
+        fontname=fn,
+        align=align,
+        lineheight=_LINE_HEIGHT_FACTOR,
+    )
+    if rc >= 0:
+        return base_size
 
     lo, hi = min_size, base_size
     result = min_size
@@ -229,6 +251,168 @@ def _find_fitting_size(
             hi = mid
 
     return result
+
+
+def _estimate_text_width(text: str, font_size: float) -> float:
+    """Estimate pixel width of text. CJK = font_size, ASCII = font_size * 0.55."""
+    w = 0.0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x3000 <= cp <= 0x9FFF
+            or 0xAC00 <= cp <= 0xD7AF
+            or 0xF900 <= cp <= 0xFAFF
+            or 0x20000 <= cp <= 0x2FA1F
+        ):
+            w += font_size
+        else:
+            w += font_size * 0.55
+    return w
+
+
+def _wrap_char_colors(char_colors: list, max_width: float, font_size: float) -> list:
+    """Word-wrap a list of (char, color) tuples into visual lines.
+
+    Returns a list of lines, where each line is a list of (char, color).
+    Wraps at *max_width* pixels using em-width estimation at *font_size*.
+    Explicit newlines are honoured.
+    """
+    lines: list = []
+    current_line: list = []
+    current_width = 0.0
+
+    for ch, color in char_colors:
+        if ch == '\n':
+            lines.append(current_line)
+            current_line = []
+            current_width = 0.0
+            continue
+        cp = ord(ch)
+        if (
+            0x3000 <= cp <= 0x9FFF
+            or 0xAC00 <= cp <= 0xD7AF
+            or 0xF900 <= cp <= 0xFAFF
+            or 0x20000 <= cp <= 0x2FA1F
+        ):
+            ch_w = font_size
+        else:
+            ch_w = font_size * 0.55
+
+        if current_width + ch_w > max_width and current_line:
+            lines.append(current_line)
+            current_line = []
+            current_width = 0.0
+        current_line.append((ch, color))
+        current_width += ch_w
+
+    if current_line:
+        lines.append(current_line)
+    return lines
+
+
+def insert_text_multicolor(
+    page: fitz.Page,
+    bbox: fitz.Rect,
+    text: str,
+    base_size: float,
+    color_spans: list,
+    align: int,
+    fontname: Optional[str] = None,
+    fontfile: Optional[str] = None,
+    line_height: float = _LINE_HEIGHT_FACTOR,
+) -> None:
+    """Render *text* inside *bbox* with per-span colors using insert_text.
+
+    *color_spans* is a list of {"text": str, "color": [R,G,B]} dicts.
+    Each span's text is rendered with its own color.
+
+    The font size is scaled down (to a minimum of 4pt) so that all text
+    fits inside *bbox* without truncation.
+    """
+    if not text.strip():
+        return
+    text = text.replace("\u3000", "\xa0")
+    if bbox.width < 2 or bbox.height < 2:
+        return
+
+    fn = fontname or "helv"
+
+    # Build segments from color_spans (text-based format)
+    segments = []  # list of (segment_text, color_tuple)
+    for span in color_spans:
+        seg_text = span["text"].replace("\u3000", "\xa0")
+        color = tuple(float(c) for c in span["color"])
+        if seg_text:
+            segments.append((seg_text, color))
+
+    if not segments:
+        return
+
+    # Flatten into per-character colors
+    char_colors = []
+    for seg_text, color in segments:
+        for ch in seg_text:
+            char_colors.append((ch, color))
+
+    # --- Determine font size that fits all text in bbox ---
+    # Use the full concatenated text for fitting (same logic as insert_text_fitting)
+    full_text = "".join(ch for ch, _ in char_colors)
+    dominant_color = segments[0][1] if segments else (0, 0, 0)
+    fit_size = _find_fitting_size(
+        page, bbox, full_text, base_size, dominant_color, align,
+        fontname=fn, min_size=4.0,
+    )
+    render_size = fit_size
+
+    # --- Wrap lines at bbox width using render_size ---
+    wrapped_lines = _wrap_char_colors(char_colors, bbox.width, render_size)
+
+    # Render each line
+    y = bbox.y0 + render_size
+    for line_chars in wrapped_lines:
+        if not line_chars or all(ch.isspace() for ch, _ in line_chars):
+            y += render_size * line_height
+            continue
+        if y > bbox.y1:
+            break
+
+        line_text = "".join(ch for ch, _ in line_chars)
+
+        # Group consecutive same-color chars into runs
+        runs = []  # list of (run_text, color)
+        for ch, color in line_chars:
+            if runs and runs[-1][1] == color:
+                runs[-1] = (runs[-1][0] + ch, color)
+            else:
+                runs.append((ch, color))
+
+        # Compute line width for alignment
+        line_width = _estimate_text_width(line_text, render_size)
+        if align == 1:  # CENTER
+            x = bbox.x0 + (bbox.width - line_width) / 2.0
+            x = max(x, bbox.x0)
+        elif align == 2:  # RIGHT
+            x = bbox.x1 - line_width
+            x = max(x, bbox.x0)
+        else:  # LEFT
+            x = bbox.x0
+
+        # Render each run
+        for run_text, color in runs:
+            try:
+                kwargs = dict(
+                    fontsize=render_size,
+                    fontname=fn,
+                    color=color,
+                )
+                if fontfile:
+                    kwargs["fontfile"] = fontfile
+                page.insert_text(fitz.Point(x, y), run_text, **kwargs)
+            except Exception as exc:
+                print(f"[WARN] insert_text failed: {exc}", file=sys.stderr)
+            x += _estimate_text_width(run_text, render_size)
+
+        y += render_size * line_height
 
 
 def insert_text_fitting(
@@ -261,25 +445,65 @@ def insert_text_fitting(
         fontname=fn, min_size=min_size,
     )
 
-    # Commit via Shape; fall back to page.insert_textbox when fontfile is needed
-    try:
-        shape = page.new_shape()
-        rc = shape.insert_textbox(
-            bbox, text,
-            fontsize=fit_size,
-            fontname=fn,
-            color=color,
-            align=align,
-            lineheight=_LINE_HEIGHT_FACTOR,
-        )
-        if rc >= 0:
-            shape.commit()
-            return
-        shape.commit()  # commit anyway (partial render)
-    except Exception:
-        pass
+    # Commit via Shape — if the em-width estimated fit_size doesn't actually
+    # fit (rc < 0), binary-search with real insert_textbox to find a size that
+    # works.  This fixes CJK blocks where em-width approximation overestimates
+    # capacity, causing text to disappear entirely.
+    _ABS_MIN = 4.0  # absolute minimum to prevent invisible text
 
-    # Fallback: page.insert_textbox with fontfile
+    def _try_commit(size: float) -> bool:
+        """Try to render text at *size*; return True if successful."""
+        try:
+            s = page.new_shape()
+            rc = s.insert_textbox(
+                bbox, text,
+                fontsize=size,
+                fontname=fn,
+                color=color,
+                align=align,
+                lineheight=_LINE_HEIGHT_FACTOR,
+            )
+            if rc >= 0:
+                s.commit()
+                return True
+        except Exception:
+            pass
+        return False
+
+    if _try_commit(fit_size):
+        return
+
+    # fit_size didn't work — binary search downward with real font metrics
+    lo_s, hi_s = _ABS_MIN, fit_size
+    best_s = None
+    for _ in range(8):
+        mid_s = (lo_s + hi_s) / 2.0
+        try:
+            s = page.new_shape()
+            rc = s.insert_textbox(
+                bbox, text,
+                fontsize=mid_s,
+                fontname=fn,
+                color=color,
+                align=align,
+                lineheight=_LINE_HEIGHT_FACTOR,
+            )
+            if rc >= 0:
+                best_s = mid_s
+                lo_s = mid_s
+            else:
+                hi_s = mid_s
+        except Exception:
+            hi_s = mid_s
+
+    if best_s is not None and _try_commit(best_s):
+        return
+
+    # Last resort: try at _ABS_MIN
+    if _try_commit(_ABS_MIN):
+        return
+
+    # Fallback: page.insert_textbox with fontfile (different rendering path)
     try:
         kwargs: dict = dict(
             fontsize=fit_size,
@@ -587,11 +811,42 @@ def render_page(
     # ------------------------------------------------------------------
     # Step 9: Phase 2 — compute fitting_sizes via VisualOptimizer
     # ------------------------------------------------------------------
+    _READABILITY_FLOOR = 8.0  # minimum readable font size (pt)
+    _OVERFLOW_MIN_SIZE = 4.0  # absolute minimum for overflow fallback
+
     visual = VisualOptimizer(page, fontname=fn, fontfile=cjk_font)
     fitting_sizes = [
         visual.fitting_size(ibbox, text, ss, color=(0, 0, 0), align=align)
         for ibbox, text, ss, align in zip(insert_bboxes, translated_texts, source_sizes, aligns)
     ]
+
+    # Step 9b: Readability overflow — when fitting_size < 8pt, expand bbox
+    # instead of using tiny font.  This targets diagram/architecture pages
+    # with many small annotation blocks.
+    overflow_expanded = [False] * len(fitting_sizes)  # track which blocks were expanded
+    for i in range(len(fitting_sizes)):
+        if fitting_sizes[i] < _READABILITY_FLOOR and translated_texts[i].strip():
+            expanded = visual.overflow_bbox(
+                insert_bboxes[i],
+                translated_texts[i],
+                _READABILITY_FLOOR,
+                color=(0, 0, 0),
+                align=aligns[i],
+                page_rect=page_rect,
+            )
+            insert_bboxes[i] = expanded
+            # Verify text actually fits at 8pt in expanded bbox; if not,
+            # re-fit with a lower floor so text renders (small > invisible).
+            verify_size = visual.fitting_size(
+                expanded, translated_texts[i], _READABILITY_FLOOR,
+                color=(0, 0, 0), align=aligns[i], min_size=_OVERFLOW_MIN_SIZE,
+            )
+            if verify_size >= _READABILITY_FLOOR:
+                fitting_sizes[i] = _READABILITY_FLOOR
+                overflow_expanded[i] = True
+            else:
+                # Expansion was insufficient — use the best size that fits
+                fitting_sizes[i] = verify_size
 
     # ------------------------------------------------------------------
     # Step 10: Consistency pass via VisualOptimizer
@@ -610,39 +865,49 @@ def render_page(
     n_blocks = len(render_sizes)
 
     def _apply_sibling_min(groups_of_indices: list) -> None:
-        """Set all render_sizes in each group to the group's minimum."""
-        for group in groups_of_indices:
-            if len(group) >= 2:
-                min_size = min(render_sizes[i] for i in group)
-                for i in group:
-                    render_sizes[i] = min_size
+        """Set all render_sizes in non-title members of each group to the group's minimum.
 
-    # Build column sibling groups (shared x0 ±15px)
+        Title blocks are excluded from normalization: they must not be capped
+        down to the minimum of body-text siblings that happen to share an x0/y0.
+        The result is floored at _READABILITY_FLOOR to prevent tiny text.
+        """
+        for group in groups_of_indices:
+            # Only normalize non-title members among themselves
+            non_title = [i for i in group if not title_mask[i]]
+            if len(non_title) >= 2:
+                group_min = max(
+                    min(render_sizes[i] for i in non_title),
+                    _READABILITY_FLOOR,
+                )
+                for i in non_title:
+                    render_sizes[i] = min(render_sizes[i], group_min)
+
+    # Build column sibling groups (shared x0 ±15px) — exclude title blocks
     col_visited = [False] * n_blocks
     col_groups = []
     for i in range(n_blocks):
-        if col_visited[i]:
+        if col_visited[i] or title_mask[i]:
             continue
         group = [i]
         xi = insert_bboxes[i].x0
         for j in range(i + 1, n_blocks):
-            if not col_visited[j] and abs(insert_bboxes[j].x0 - xi) <= _X0_TOL:
+            if not col_visited[j] and not title_mask[j] and abs(insert_bboxes[j].x0 - xi) <= _X0_TOL:
                 group.append(j)
         if len(group) >= 2:
             col_groups.append(group)
             for idx in group:
                 col_visited[idx] = True
 
-    # Build row sibling groups (shared y0 ±6px)
+    # Build row sibling groups (shared y0 ±6px) — exclude title blocks
     row_visited = [False] * n_blocks
     row_groups = []
     for i in range(n_blocks):
-        if row_visited[i]:
+        if row_visited[i] or title_mask[i]:
             continue
         group = [i]
         yi = insert_bboxes[i].y0
         for j in range(i + 1, n_blocks):
-            if not row_visited[j] and abs(insert_bboxes[j].y0 - yi) <= _Y0_TOL:
+            if not row_visited[j] and not title_mask[j] and abs(insert_bboxes[j].y0 - yi) <= _Y0_TOL:
                 group.append(j)
         if len(group) >= 2:
             row_groups.append(group)
@@ -652,6 +917,56 @@ def render_page(
     render_sizes = list(render_sizes)  # ensure mutable list
     _apply_sibling_min(col_groups)
     _apply_sibling_min(row_groups)
+
+    # ------------------------------------------------------------------
+    # Step 10b: Content overflow — expand bbox for blocks where text
+    # still exceeds bbox capacity at render_size (prevents truncation).
+    # If bbox expansion is insufficient (page bounds), fall back to
+    # shrinking font size below the 8pt floor — truncated text is worse
+    # than small text.
+    # ------------------------------------------------------------------
+    for i in range(len(render_sizes)):
+        if not translated_texts[i].strip():
+            continue
+        rs = render_sizes[i]
+        ibbox = insert_bboxes[i]
+        if rs <= 0 or ibbox.width < 2 or ibbox.height < 2:
+            continue
+        # Estimate if text overflows: use em-width estimation
+        em_w = estimate_em_width(translated_texts[i])
+        chars_per_line = ibbox.width / rs if rs > 0 else 999
+        if chars_per_line <= 0:
+            continue
+        lines_needed = math.ceil(em_w / chars_per_line)
+        height_needed = lines_needed * rs * _LINE_HEIGHT_FACTOR
+        if height_needed > ibbox.height * 1.1:  # >10% overflow
+            expanded = visual.overflow_bbox(
+                ibbox,
+                translated_texts[i],
+                rs,
+                color=(0, 0, 0),
+                align=aligns[i],
+                page_rect=page_rect,
+            )
+            insert_bboxes[i] = expanded
+
+            # Check if expansion was sufficient — re-estimate overflow
+            exp_bbox = insert_bboxes[i]
+            exp_cpl = exp_bbox.width / rs if rs > 0 else 999
+            if exp_cpl > 0:
+                exp_lines = math.ceil(em_w / exp_cpl)
+                exp_height = exp_lines * rs * _LINE_HEIGHT_FACTOR
+                if exp_height > exp_bbox.height * 1.05:
+                    # Bbox expansion insufficient — shrink font to fit
+                    new_rs = _find_fitting_size(
+                        page, exp_bbox, translated_texts[i],
+                        base_size=rs,
+                        color=(0, 0, 0),
+                        align=aligns[i],
+                        fontname=fn,
+                        min_size=_OVERFLOW_MIN_SIZE,
+                    )
+                    render_sizes[i] = new_rs
 
     # ------------------------------------------------------------------
     # Step 11: Phase 3 — render
@@ -664,14 +979,60 @@ def render_page(
             text = blocks[idx].get("text", text)
         src_color = source_colors[idx] if idx < len(source_colors) else (0.0, 0.0, 0.0)
         color = visual.adjust_color(src_color)
-        insert_text_fitting(
-            page, ibbox, text,
-            base_size=rs,
-            color=color,
-            align=align,
-            fontname=fn,
-            fontfile=cjk_font,
-        )
+
+        block = blocks[idx] if idx < len(blocks) else {}
+
+        # Prefer translated_spans (from span-aware translation) over color_spans
+        translated_spans = block.get("translated_spans", [])
+        if len(translated_spans) > 1:
+            # Adjust each span color through visual.adjust_color
+            adjusted_cs = [
+                {"text": s["text"],
+                 "color": list(visual.adjust_color(tuple(float(c) for c in s["color"])))}
+                for s in translated_spans
+            ]
+            insert_text_multicolor(
+                page, ibbox, text,
+                base_size=rs,
+                color_spans=adjusted_cs,
+                align=align,
+                fontname=fn,
+                fontfile=cjk_font,
+            )
+        else:
+            # Fallback: check original color_spans (text format)
+            cs = block.get("color_spans", [])
+            has_multicolor = len(cs) > 1
+
+            if has_multicolor:
+                # Adjust each span color through visual.adjust_color
+                adjusted_cs = [
+                    {"text": s["text"],
+                     "color": list(visual.adjust_color(tuple(float(c) for c in s["color"])))}
+                    for s in cs
+                ]
+                insert_text_multicolor(
+                    page, ibbox, text,
+                    base_size=rs,
+                    color_spans=adjusted_cs,
+                    align=align,
+                    fontname=fn,
+                    fontfile=cjk_font,
+                )
+            else:
+                # If this block was overflow-expanded (Step 9b), prevent
+                # re-shrinking below the readability floor by setting
+                # min_factor=1.0 so min_size == base_size == render_size.
+                mf = 1.0 if overflow_expanded[idx] else 0.4
+                insert_text_fitting(
+                    page, ibbox, text,
+                    base_size=rs,
+                    color=color,
+                    align=align,
+                    fontname=fn,
+                    fontfile=cjk_font,
+                    min_factor=mf,
+                )
 
 
 # ---------------------------------------------------------------------------

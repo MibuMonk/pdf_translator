@@ -85,6 +85,19 @@ def _fs_compatible(a: dict, b: dict) -> bool:
     return ratio <= FS_RATIO_MAX
 
 
+def _color_compatible(a: dict, b: dict, tol: float = 0.05) -> bool:
+    """True if both blocks share the same color (within float tolerance)."""
+    ca = a.get("color")
+    cb = b.get("color")
+    if ca is None and cb is None:
+        return True
+    if ca is None or cb is None:
+        return False
+    if len(ca) != len(cb):
+        return False
+    return all(abs(x - y) < tol for x, y in zip(ca, cb))
+
+
 def _merge_two(a: dict, b: dict) -> dict:
     """Merge block b into block a, returning a new combined block."""
     merged_text = a["text"].rstrip("\n") + "\n" + b["text"].lstrip("\n")
@@ -96,7 +109,7 @@ def _merge_two(a: dict, b: dict) -> dict:
     ]
     merged_redact = list(a.get("redact_bboxes", [a["bbox"]])) + \
                     list(b.get("redact_bboxes", [b["bbox"]]))
-    return {
+    result = {
         **a,
         "text": merged_text,
         "bbox": merged_bbox,
@@ -104,6 +117,28 @@ def _merge_two(a: dict, b: dict) -> dict:
         # keep the larger font_size (header dominates)
         "font_size": max(a["font_size"], b["font_size"]),
     }
+    # Merge color_spans if present in either block (text format)
+    cs_a = a.get("color_spans", [])
+    cs_b = b.get("color_spans", [])
+    if cs_a or cs_b:
+        # If a block had no color_spans, treat as single-color
+        if not cs_a:
+            cs_a = [{"text": a["text"], "color": list(a.get("color", [0, 0, 0]))}]
+        if not cs_b:
+            cs_b = [{"text": b["text"], "color": list(b.get("color", [0, 0, 0]))}]
+        # Concatenate
+        merged_cs = list(cs_a) + list(cs_b)
+        # Merge adjacent same-color
+        compact = [dict(merged_cs[0])]
+        for s in merged_cs[1:]:
+            if s["color"] == compact[-1]["color"]:
+                compact[-1]["text"] = compact[-1]["text"] + s["text"]
+            else:
+                compact.append(dict(s))
+        # Only store if multiple segments
+        if len(compact) > 1:
+            result["color_spans"] = compact
+    return result
 
 
 # ── Column grouping ───────────────────────────────────────────────────────────
@@ -157,6 +192,7 @@ def _merge_column(blocks: list, all_page_blocks: list,
         prev_has_horiz = _has_horizontal_neighbor(prev, all_page_blocks)
         block_has_horiz = _has_horizontal_neighbor(block, all_page_blocks)
         fs_ok = _fs_compatible(prev, block)
+        color_ok = _color_compatible(prev, block)
         ends_hard = _ends_hard(prev["text"])
 
         can_merge = (
@@ -164,6 +200,7 @@ def _merge_column(blocks: list, all_page_blocks: list,
             and gap <= Y_GAP_MAX              # close enough
             and _same_column(prev, block)     # same column (redundant safety)
             and fs_ok                         # similar font sizes
+            and color_ok                      # same color
             and not ends_hard                 # previous block doesn't close a sentence
             and not prev_has_horiz            # not a table cell
             and not block_has_horiz           # not a table cell
@@ -202,6 +239,8 @@ def _merge_column(blocks: list, all_page_blocks: list,
                     skip_reasons.append("ends_hard")
                 if not fs_ok:
                     skip_reasons.append("fs_incompatible")
+                if not color_ok:
+                    skip_reasons.append("color_incompatible")
                 if skip_reasons:
                     skipped_log.append({
                         "page": page_num,

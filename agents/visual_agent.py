@@ -9,7 +9,7 @@ from typing import List, Optional
 
 import fitz  # PyMuPDF
 
-LINE_HEIGHT = 1.4
+LINE_HEIGHT = 1.2
 
 
 def has_cjk(text: str) -> bool:
@@ -51,6 +51,125 @@ class VisualOptimizer:
     # Public API
     # ------------------------------------------------------------------
 
+    def overflow_bbox(
+        self,
+        bbox: fitz.Rect,
+        text: str,
+        target_size: float,
+        color: tuple,
+        align: int,
+        page_rect: fitz.Rect,
+    ) -> fitz.Rect:
+        """Expand *bbox* vertically so that *text* fits at *target_size*.
+
+        Used when fitting_size would go below the readability floor (8pt).
+        Instead of shrinking font below 8pt, we expand the bbox downward
+        (clamped to page bounds) so text remains readable.
+
+        Returns the expanded bbox (or original if it already fits).
+        """
+        fontname = self.fontname
+        if fontname and not has_cjk(text):
+            fontname = None
+        if has_cjk(text):
+            text = text.replace(" ", "\u00a0")
+        font_kw = self._font_kw(fontname)
+
+        # Check if text already fits
+        try:
+            shape = self.page.new_shape()
+            result = shape.insert_textbox(
+                bbox, text,
+                fontsize=target_size,
+                color=color,
+                align=align,
+                lineheight=LINE_HEIGHT,
+                **font_kw,
+            )
+            if result >= 0:
+                return bbox
+        except Exception:
+            return bbox
+
+        # Binary search for required height (vertical expansion only first)
+        lo_h = bbox.height
+        hi_h = max(bbox.height * 4, target_size * 20)  # generous upper bound
+        max_y1 = page_rect.height - 2  # stay within page
+
+        for _ in range(10):
+            mid_h = (lo_h + hi_h) / 2.0
+            new_y1 = min(bbox.y0 + mid_h, max_y1)
+            test_bbox = fitz.Rect(bbox.x0, bbox.y0, bbox.x1, new_y1)
+            try:
+                shape = self.page.new_shape()
+                result = shape.insert_textbox(
+                    test_bbox, text,
+                    fontsize=target_size,
+                    color=color,
+                    align=align,
+                    lineheight=LINE_HEIGHT,
+                    **font_kw,
+                )
+                if result >= 0:
+                    hi_h = mid_h
+                else:
+                    lo_h = mid_h
+            except Exception:
+                hi_h = mid_h
+
+        final_y1 = min(bbox.y0 + hi_h, max_y1)
+        vert_bbox = fitz.Rect(bbox.x0, bbox.y0, bbox.x1, final_y1)
+
+        # Check if vertical-only expansion is sufficient
+        try:
+            shape = self.page.new_shape()
+            result = shape.insert_textbox(
+                vert_bbox, text,
+                fontsize=target_size,
+                color=color,
+                align=align,
+                lineheight=LINE_HEIGHT,
+                **font_kw,
+            )
+            if result >= 0:
+                return vert_bbox
+        except Exception:
+            pass
+
+        # Vertical expansion hit page bounds — also try horizontal expansion.
+        # Expand left/right symmetrically, clamped to page margins (2px inset).
+        min_x0 = page_rect.x0 + 2
+        max_x1 = page_rect.x1 - 2
+        avail_left = bbox.x0 - min_x0
+        avail_right = max_x1 - bbox.x1
+        # Binary search for horizontal expansion amount
+        lo_dx, hi_dx = 0.0, max(avail_left, avail_right)
+        best_bbox = vert_bbox
+        for _ in range(10):
+            mid_dx = (lo_dx + hi_dx) / 2.0
+            exp_x0 = max(bbox.x0 - min(mid_dx, avail_left), min_x0)
+            exp_x1 = min(bbox.x1 + min(mid_dx, avail_right), max_x1)
+            test_bbox = fitz.Rect(exp_x0, bbox.y0, exp_x1, final_y1)
+            try:
+                shape = self.page.new_shape()
+                result = shape.insert_textbox(
+                    test_bbox, text,
+                    fontsize=target_size,
+                    color=color,
+                    align=align,
+                    lineheight=LINE_HEIGHT,
+                    **font_kw,
+                )
+                if result >= 0:
+                    best_bbox = test_bbox
+                    hi_dx = mid_dx
+                else:
+                    lo_dx = mid_dx
+            except Exception:
+                hi_dx = mid_dx
+
+        return best_bbox
+
     def fitting_size(
         self,
         bbox: fitz.Rect,
@@ -58,7 +177,7 @@ class VisualOptimizer:
         base_size: float,
         color: tuple,
         align: int,
-        min_size: float = 4.0,
+        min_size: float = 6.0,
     ) -> float:
         """Binary search for largest font size in [min_size, base_size] that fits text in bbox."""
 
@@ -73,9 +192,10 @@ class VisualOptimizer:
 
         font_kw = self._font_kw(fontname)
 
-        # Small bbox shortcut
-        if bbox.height > 0 and bbox.height < base_size * 1.4:
-            return max(min_size, min(base_size, bbox.height / 1.4))
+        # Small bbox shortcut: ASCII-only text can use height/LINE_HEIGHT estimate.
+        # CJK text always goes through _fits() binary search for accurate measurement.
+        if bbox.height > 0 and bbox.height < base_size * LINE_HEIGHT and not has_cjk(text):
+            return max(min_size, min(base_size, bbox.height / LINE_HEIGHT))
 
         def _fits(size: float) -> bool:
             try:
@@ -136,7 +256,7 @@ class VisualOptimizer:
         fitting_sizes: List[float],
         base_sizes: List[float],
         title_mask: List[bool],
-        percentile: float = 0.80,
+        percentile: float = 0.90,
     ) -> List[float]:
         """
         Apply 80th-percentile cap per base_size group.

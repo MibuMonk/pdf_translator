@@ -1,0 +1,390 @@
+[
+  {
+    "page_num": 1,
+    "block_count": 1,
+    "blocks": [
+      {
+        "id": "p01_b000",
+        "translated_prefix": "2026.02.11",
+        "font_size": 24.0
+      }
+    ]
+  },
+  {
+    "page_num": 2,
+    "block_count": 18,
+    "blocks": [
+      {
+        "id": "p02_b000",
+        "translated_prefix": "端到端大模型：中国首个量产落地",
+        "font_size": 24.0
+      },
+      {
+        "id": "p02_b001",
+        "translated_prefix": "• 将感知模块中各分离任务和序列逐步整合进大模型，最终与规划",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p02_b002",
+        "translated_prefix": "AD 算法 2.0",
+        "font_size": 12.999998092651367
+      },
+      {
+        "id": "p02_b003",
+        "translated_prefix": "AD 算法 3.0",
+        "font_size": 12.999998092651367
+      },
+      {
+        "id": "p02_b004",
+        "translated_prefix": "AD 算法 4.0",
+        "font_size": 12.999998092651367
+      },
+      {
+        "id": "p02_b005",
+        "translated_prefix": "AD 算法 5.0",
+        "font_size": 12.999998092651367
+      },
+      {
+        "id": "p02_b006",
+        "translated_prefix": "感知：拆分为\n多个任务，每个\n均为数据驱动模型。",
+        "font_size": 10.999998092651367
+      },
+      {
+        "id": "p02_b007",
+        "translated_prefix": "感知：与序列\n相关的模块整合\n为统一模型。",
+        "font_size": 10.999998092651367
+      },
+      {
+        "id": "p02_b008",
+        "translated_prefix": "感知：所有感知\n任务整合为\n统一模型。",
+        "font_size": 10.999998092651367
+      },
+      {
+        "id": "p02_b009",
+        "translated_prefix": "从感知到规划采用单一大模型，模拟人类长期记忆；同时保留 DL",
+        "font_size": 10.999998092651367
+      },
+      {
+        "id": "p02_b010",
+        "translated_prefix": "规划：以规则为主",
+        "font_size": 10.999998092651367
+      },
+      {
+        "id": "p02_b011",
+        "translated_prefix": "规划：从基于规则\n向数据驱动演进。",
+        "font_size": 10.999998092651367
+      },
+      {
+        "id": "p02_b012",
+        "translated_prefix": "规划：全数据驱动，\n应对认知类任务。",
+        "font_size": 10.999998092651367
+      },
+      {
+        "id": "p02_b013",
+        "translated_prefix": "持续演进迈向\n有条件/高度\n自动驾驶",
+        "font_size": 12.0
+      },
+      {
+        "id": "p02_b014",
+        "translated_prefix": "规划",
+        "font_size": 9.0
+      },
+      {
+        "id": "p02_b015",
+        "translated_prefix": "2023 下半年",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p02_b016",
+        "translated_prefix": "2023 上半年",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p02_b017",
+        "translated_prefix": "DDOD: Data-Driven Object & Obs",
+        "font_size": 7.999998569488525
+      }
+    ]
+  },
+  {
+    "page_num": 3,
+    "block_count": 19,
+    "blocks": [
+      {
+        "id": "p03_b000",
+        "translated_prefix": "强化学习大模型：超越人类水平的 AI 驾驶员",
+        "font_size": 24.0
+      },
+      {
+        "id": "p03_b001",
+        "translated_prefix": "模仿学习",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p03_b002",
+        "translated_prefix": "实践学习",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p03_b003",
+        "translated_prefix": "世界模型学习",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p03_b004",
+        "translated_prefix": "• 端到端大模型直接\n输出轨迹\n• 以经验丰富的人类驾驶员\n",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p03_b005",
+        "translated_prefix": "• 模型展开多条\n候选轨迹\n• 以奖励函数监督：安全性、\n舒",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p03_b006",
+        "translated_prefix": "• 使用世界模型更好地捕捉\n物理世界规律\n• 学习更优的特征",
+        "font_size": 13.999998092651367
+      },
+      {
+        "id": "p03_b007",
+        "translated_prefix": "传感器原始数据",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b008",
+        "translated_prefix": "传感器原始数据",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b009",
+        "translated_prefix": "世界模型重建",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b010",
+        "translated_prefix": "监督数据\n经验驾驶员轨迹",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b011",
+        "translated_prefix": "规划\n轨迹",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b012",
+        "translated_prefix": "规划轨迹",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b013",
+        "translated_prefix": "监督准则：安全性、\n舒适性、效率等",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b014",
+        "translated_prefix": "监督准则：安全性、\n舒适性、效率等",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b015",
+        "translated_prefix": "策略更新",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b016",
+        "translated_prefix": "策略更新",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p03_b017",
+        "translated_prefix": "Δ",
+        "font_size": 18.0
+      },
+      {
+        "id": "p03_b018",
+        "translated_prefix": "EBM：端到端大模型",
+        "font_size": 7.999998569488525
+      }
+    ]
+  },
+  {
+    "page_num": 4,
+    "block_count": 14,
+    "blocks": [
+      {
+        "id": "p04_b000",
+        "translated_prefix": "强化学习：可规模化 L4 的核心技术路径",
+        "font_size": 24.0
+      },
+      {
+        "id": "p04_b001",
+        "translated_prefix": "模型\n性能",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p04_b002",
+        "translated_prefix": "SOP 车型",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p04_b003",
+        "translated_prefix": "• R9 是物理世界基础模型，可通过传感器原始数据源，以像素",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p04_b004",
+        "translated_prefix": ">10M",
+        "font_size": 12.0
+      },
+      {
+        "id": "p04_b005",
+        "translated_prefix": "• R7 引入世界模型，大幅提升物理世界建模能力，突破纯语言",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p04_b006",
+        "translated_prefix": "R9",
+        "font_size": 24.0
+      },
+      {
+        "id": "p04_b007",
+        "translated_prefix": "2M",
+        "font_size": 12.0
+      },
+      {
+        "id": "p04_b008",
+        "translated_prefix": "• R6 是中国首个量产 RL 大模型。\n• 以 Rewar",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p04_b009",
+        "translated_prefix": "R7",
+        "font_size": 24.0
+      },
+      {
+        "id": "p04_b010",
+        "translated_prefix": "700k",
+        "font_size": 12.0
+      },
+      {
+        "id": "p04_b011",
+        "translated_prefix": "R6",
+        "font_size": 24.0
+      },
+      {
+        "id": "p04_b012",
+        "translated_prefix": "2027+",
+        "font_size": 9.999998092651367
+      },
+      {
+        "id": "p04_b013",
+        "translated_prefix": "Time",
+        "font_size": 9.999998092651367
+      }
+    ]
+  },
+  {
+    "page_num": 5,
+    "block_count": 5,
+    "blocks": [
+      {
+        "id": "p05_b000",
+        "translated_prefix": "窄路空间的高效利用",
+        "font_size": 24.0
+      },
+      {
+        "id": "p05_b001",
+        "translated_prefix": "Bad",
+        "font_size": 7.999998569488525
+      },
+      {
+        "id": "p05_b002",
+        "translated_prefix": "Good",
+        "font_size": 7.999998569488525
+      },
+      {
+        "id": "p05_b003",
+        "translated_prefix": "不良行为",
+        "font_size": 15.99999713897705
+      },
+      {
+        "id": "p05_b004",
+        "translated_prefix": "良好行为",
+        "font_size": 15.99999713897705
+      }
+    ]
+  },
+  {
+    "page_num": 6,
+    "block_count": 5,
+    "blocks": [
+      {
+        "id": "p06_b000",
+        "translated_prefix": "智能车道选择，驾驶效率最大化",
+        "font_size": 24.0
+      },
+      {
+        "id": "p06_b001",
+        "translated_prefix": "Bad",
+        "font_size": 7.999998569488525
+      },
+      {
+        "id": "p06_b002",
+        "translated_prefix": "Good",
+        "font_size": 7.999998569488525
+      },
+      {
+        "id": "p06_b003",
+        "translated_prefix": "不良行为",
+        "font_size": 15.99999713897705
+      },
+      {
+        "id": "p06_b004",
+        "translated_prefix": "良好行为",
+        "font_size": 15.99999713897705
+      }
+    ]
+  },
+  {
+    "page_num": 7,
+    "block_count": 5,
+    "blocks": [
+      {
+        "id": "p07_b000",
+        "translated_prefix": "果断且安全的无保护左转",
+        "font_size": 24.0
+      },
+      {
+        "id": "p07_b001",
+        "translated_prefix": "Bad",
+        "font_size": 7.999998569488525
+      },
+      {
+        "id": "p07_b002",
+        "translated_prefix": "Good",
+        "font_size": 7.999998569488525
+      },
+      {
+        "id": "p07_b003",
+        "translated_prefix": "不良行为",
+        "font_size": 15.99999713897705
+      },
+      {
+        "id": "p07_b004",
+        "translated_prefix": "良好行为",
+        "font_size": 15.99999713897705
+      }
+    ]
+  },
+  {
+    "page_num": 8,
+    "block_count": 1,
+    "blocks": [
+      {
+        "id": "p08_b000",
+        "translated_prefix": "谢谢",
+        "font_size": 79.99999237060547
+      }
+    ]
+  }
+]

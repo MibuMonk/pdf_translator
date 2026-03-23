@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from typing import List, Optional, Tuple
 
 # ── 定数 ──────────────────────────────────────────────────────────────────────
@@ -34,6 +35,61 @@ _DIGITS_ONLY_RE = re.compile(r'^\s*\d+\s*$')
 def color_from_int(c: int) -> Tuple[float, float, float]:
     """PyMuPDF の整数カラー値を (R, G, B) float タプルに変換する。"""
     return ((c >> 16 & 0xFF) / 255.0, (c >> 8 & 0xFF) / 255.0, (c & 0xFF) / 255.0)
+
+
+def _dominant_color_int(lines: list) -> int:
+    """lines 内の全 span を走査し、字符数が最も多い色（int）を返す。"""
+    counts: Counter = Counter()
+    for line in lines:
+        for span in line["spans"]:
+            counts[span["color"]] += len(span["text"])
+    if counts:
+        return counts.most_common(1)[0][0]
+    return lines[0]["spans"][0]["color"]
+
+
+def _line_dominant_color_int(line: dict) -> int:
+    """1 行内の全 span を走査し、字符数が最も多い色（int）を返す。"""
+    counts: Counter = Counter()
+    for span in line["spans"]:
+        counts[span["color"]] += len(span["text"])
+    if counts:
+        return counts.most_common(1)[0][0]
+    return line["spans"][0]["color"]
+
+
+def _build_color_spans(lines: list) -> list:
+    """
+    Build color_spans from all spans in lines.
+    Adjacent same-color spans are merged. Each entry has text and color.
+    Returns list of {"text": str, "color": [R, G, B]} dicts.
+    If all text is one color, returns empty list (caller uses 'color' fallback).
+    """
+    # Collect (text, color_int) for all spans in order
+    segments: list = []
+    for line in lines:
+        for span in line["spans"]:
+            text = _normalize_span_text(span)
+            if not text:
+                continue
+            c_int = span["color"]
+            # Merge with previous if same color
+            if segments and segments[-1][1] == c_int:
+                segments[-1] = (segments[-1][0] + text, c_int)
+            else:
+                segments.append((text, c_int))
+
+    if not segments:
+        return []
+
+    # If only one color, return empty (use 'color' field fallback)
+    if len(segments) == 1:
+        return []
+
+    return [
+        {"text": seg_text, "color": list(color_from_int(c_int))}
+        for seg_text, c_int in segments
+    ]
 
 
 def _normalize_span_text(span: dict) -> str:
@@ -298,7 +354,7 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
         if lines_are_scattered(block):
             # 散乱ブロック: 行ごとに独立したアイテムとして処理
             scattered_lines = block["lines"]
-            sl_merged: list = []  # [(merged_text, merged_bbox_list, span0)]
+            sl_merged: list = []  # [(merged_text, merged_bbox_list, span0, merged_lines)]
             si = 0
             while si < len(scattered_lines):
                 line = scattered_lines[si]
@@ -306,6 +362,7 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
                 merged_text = lt
                 merged_bbox = list(line["bbox"])
                 span0 = line["spans"][0]
+                group_lines = [line]
                 si2 = si + 1
                 while si2 < len(scattered_lines):
                     next_line = scattered_lines[si2]
@@ -321,13 +378,14 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
                             min(merged_bbox[0], nb[0]), min(merged_bbox[1], nb[1]),
                             max(merged_bbox[2], nb[2]), max(merged_bbox[3], nb[3]),
                         ]
+                        group_lines.append(next_line)
                         si2 += 1
                     else:
                         break
-                sl_merged.append((merged_text, merged_bbox, span0))
+                sl_merged.append((merged_text, merged_bbox, span0, group_lines))
                 si = si2
 
-            for (line_text, lbbox, span) in sl_merged:
+            for (line_text, lbbox, span, grp_lines) in sl_merged:
                 if not line_text or is_skip_text(line_text):
                     continue
                 if span["size"] < MIN_TRANSLATE_FONTSIZE:
@@ -335,8 +393,10 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
                 lx0, ly0, lx1, ly1 = lbbox
                 # 行 bbox に垂直余白を追加（文字が収まるよう）
                 render_bbox = [lx0, ly0, lx1, ly1 + span["size"] * 0.5]
-                color = color_from_int(span["color"])
-                insertion_items.append({
+                color = color_from_int(_dominant_color_int(grp_lines))
+                # 散乱ブロック: per-span 色比率を記録
+                cs = _build_color_spans(grp_lines)
+                item = {
                     "text": line_text,
                     "font_size": span["size"],
                     "color": list(color),
@@ -344,11 +404,19 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
                     "bbox": render_bbox,
                     "redact_bboxes": [lbbox],
                     "stream_rank": block_rank,
-                })
+                }
+                if cs:
+                    item["color_spans"] = cs
+                insertion_items.append(item)
         else:
-            color = color_from_int(first_span["color"])
+            # 通常ブロック: 1 つのアイテムとして処理
+            color = color_from_int(_dominant_color_int(block["lines"]))
             redact_bboxes = [list(block_bbox_tuple)] + extra_redact_bboxes
-            insertion_items.append({
+
+            # per-span 色比率を記録
+            cs = _build_color_spans(block["lines"])
+
+            item = {
                 "text": block_text,
                 "font_size": block_fontsize,
                 "color": list(color),
@@ -356,7 +424,10 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
                 "bbox": list(block_bbox_tuple),
                 "redact_bboxes": redact_bboxes,
                 "stream_rank": block_rank,
-            })
+            }
+            if cs:
+                item["color_spans"] = cs
+            insertion_items.append(item)
 
     # ── 重複除去: 面積が 70% 以上重複する小ブロックを削除 ───────────────────
     if len(insertion_items) > 1:
@@ -409,12 +480,39 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
                 min(item_bbox.x0, ni_bbox.x0), item_bbox.y0,
                 max(item_bbox.x1, ni_bbox.x1), ni_bbox.y1,
             )
-            merged_text = item["text"].rstrip('\n') + '\n' + ni["text"].lstrip('\n')
+            prev_text = item["text"]  # preserve before overwrite
+            merged_text = prev_text.rstrip('\n') + '\n' + ni["text"].lstrip('\n')
             merged_redact = merged_redact + list(ni["redact_bboxes"])
             item = dict(item)
             item["text"] = merged_text
             item["bbox"] = list(merged_bbox)
             item["redact_bboxes"] = merged_redact
+            # color_spans のマージ (text format)
+            cs_a = item.get("color_spans", [])
+            cs_b = ni.get("color_spans", [])
+            # Also synthesize color_spans when neither block has them
+            # but their dominant colors differ (e.g. blue title + black bullets)
+            colors_differ = (item.get("color", [0,0,0]) != ni.get("color", [0,0,0]))
+            if cs_a or cs_b or colors_differ:
+                # If a block had no color_spans, treat it as single-color
+                if not cs_a:
+                    cs_a = [{"text": prev_text.rstrip('\n'), "color": list(item.get("color", [0, 0, 0]))}]
+                if not cs_b:
+                    cs_b = [{"text": ni["text"].lstrip('\n'), "color": list(ni.get("color", [0, 0, 0]))}]
+                # Concatenate
+                merged_cs = list(cs_a) + list(cs_b)
+                # Merge adjacent same-color
+                compact = [dict(merged_cs[0])]
+                for s in merged_cs[1:]:
+                    if s["color"] == compact[-1]["color"]:
+                        compact[-1]["text"] = compact[-1]["text"] + s["text"]
+                    else:
+                        compact.append(dict(s))
+                # If only one segment, drop color_spans (use color fallback)
+                if len(compact) > 1:
+                    item["color_spans"] = compact
+                elif "color_spans" in item:
+                    del item["color_spans"]
             item_bbox = merged_bbox
             mi += 1
         new_items.append(item)
@@ -425,7 +523,7 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
     out_blocks = []
     for bidx, item in enumerate(insertion_items):
         block_id = f"p{page_num:02d}_b{bidx:03d}"
-        out_blocks.append({
+        out_block = {
             "id": block_id,
             "text": item["text"],
             "font_size": item["font_size"],
@@ -434,7 +532,10 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
             "bbox": item["bbox"],
             "redact_bboxes": item["redact_bboxes"],
             "stream_rank": item["stream_rank"],
-        })
+        }
+        if item.get("color_spans"):
+            out_block["color_spans"] = item["color_spans"]
+        out_blocks.append(out_block)
 
     return {
         "page_num": page_num,

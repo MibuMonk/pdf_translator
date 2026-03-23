@@ -1,80 +1,95 @@
-# PDF Translator — 给下一个 Claude 的交接文件
+# PDF Translator
 
-## 这是什么
+Translates PDFs (mainly slide decks) between languages while preserving layout.
+Uses Claude CLI for translation/analysis, PyMuPDF for parsing and rendering.
 
-把 PDF（主要是幻灯片）从一种语言翻译成另一种语言，保留原始排版。
-用 Claude CLI 做翻译和分析，PyMuPDF 做解析和渲染。
+## Role of This Thread
 
-## 当前 Pipeline
+- Defines I/O contracts, writes requirements, delegates implementation to agents
+- Maintains CLAUDE.md
+- Does NOT directly edit agent implementation code
+
+Working agents own their implementation. They may freely change internal algorithms as long as output passes schema validation. I/O contract changes require coordinator approval.
+
+## Pipeline
 
 ```
-parse_agent → consolidator → [intel_agent] → translate ∥ space_planner → render_agent → qa_agent
+parse_agent → consolidator → translate ∥ space_planner → render_agent → test_agent
 ```
 
-- `parse`、`consolidate`、`intel`、`render`、`qa` 是顺序的
-- `translate` 和 `space_planner` 是并行的（intel_agent 设计的）
-- 入口：`run_pipeline.py`
+- `translate` and `space_planner` run in parallel; all others sequential
+- Entry point: `run_pipeline.py`
 
-## 各 Agent 职责
+## Agents
 
-| Agent | 目录 | 做什么 | 用 LLM？ |
-|-------|------|--------|----------|
-| parse_agent | pdf_translator_parse/ | 从 PDF 抽文本块 → parsed.json | ❌ |
-| consolidator | pdf_translator_parse/ | 合并碎片文本块 → 覆写 parsed.json | ❌ |
-| intel_agent | pdf_translator_architect/ | 分析文档，生成 workflow plan → plan.json | ✅ |
-| translate_agent | pdf_translator_translate/ | 翻译文本块 → translated.json | ✅ |
-| space_planner | pdf_translator_layout/ | 预计算 topology/Voronoi（不依赖译文）| ❌ |
-| layout_agent (render) | pdf_translator_layout/ | 字号 fitting + 渲染 → output.pdf | ❌ |
-| qa_agent | pdf_translator_qa/ | 检查覆盖率和翻译质量 → qa_report.json | ❌ |
+| Agent | Directory | Output | LLM? |
+|-------|-----------|--------|------|
+| parse_agent | agents/ | parsed.json | No |
+| consolidator | agents/ | parsed.json (overwrite) | No |
+| translate_agent | agents/ | translated.json | Yes |
+| space_planner | agents/ | layout_plan.json | No |
+| layout_agent | agents/ | output.pdf | No |
+| test_agent | agents/ | test_report.json | No |
 
-## Agent 合约（I/O Schema）
+`visual_agent.py` is not a standalone process — it is a helper module (VisualOptimizer) imported by layout_agent.py.
+`topology_agent.py` is not a standalone process — it is a helper module (TopologyAnalyzer) imported by layout_agent.py and space_planner.py.
 
-所有合约定义在 `contracts/` 目录，agent 用 `contracts/validate.py` 自验证输出。
+## I/O Contracts
 
-| Schema 文件 | 生产者 | 消费者 |
-|-------------|--------|--------|
-| `parsed.schema.json` | parse_agent, consolidator | consolidator, translate_agent, space_planner |
-| `consolidator_log.schema.json` | consolidator | intel（宪兵） |
-| `translated.schema.json` | translate_agent | render_agent, qa_agent |
-| `layout_plan.schema.json` | space_planner | render_agent |
-| `qa_report.schema.json` | qa_agent | intel（宪兵） |
+All schemas in `contracts/`. Agents self-validate using `contracts/validate.py`.
 
-**规则：agent 可以自由改内部算法，但输出必须通过自己的 schema 验证。**
-I/O 合约变更只由 Claude Code（宰相）决定。
+| Schema | Producer | Consumer |
+|--------|----------|----------|
+| parsed.schema.json | parse_agent, consolidator | consolidator, translate_agent, space_planner |
+| consolidator_log.schema.json | consolidator | (informational) |
+| translated.schema.json | translate_agent | render_agent, test_agent |
+| layout_plan.schema.json | space_planner | render_agent |
+| test_report.schema.json | test_agent | (final output) |
 
-## 关键架构决策（别改错）
+## Architectural Constraints
 
-**1. layout 拆成两阶段**
-layout 依赖译文（字号 fitting 要知道文字有多长），但 topology 分析不依赖译文。
-所以拆成：space_planner（并行） + render（顺序）。
-不要把它们合并回去。
+**Layout is split into two phases — do not merge back.**
+Topology/Voronoi (space_planner) is text-independent and runs in parallel. Font fitting (render) needs translated text and runs after.
 
-**2. intel_agent 只读+只写 plan，不执行**
-原名 architect_agent，改名因为真正的架构决策由 Claude Code（这个对话）+ CLAUDE.md 承担。
-intel_agent 做的是文档情报分析：统计特征、领域识别、术语提取、workflow 参数推荐。
-发现问题 → 写进 plan.json → run_pipeline.py 决定是否执行。
-能激活 registry 里的可选 agent，不能生成代码、不能修改其他 agent。
+**Text merging belongs in parse, not layout.**
+Consolidator must produce semantically complete blocks before translation. layout_agent's legacy `_merge_adjacent_blocks()` is a historical artifact pending migration to consolidator.
 
-**3. merge 属于 parse，不属于 layout**
-文本碎片合并要在翻译之前完成，翻译需要语义完整的输入。
-layout 里现有的 `_merge_adjacent_blocks()` 是历史遗留，待迁移到 consolidator。
+## Codebase Notes
 
-## 还没做的（TODO）
+- `agents/` directory contains all pipeline agents
+- Font auto-switcher: validates CJK coverage with a probe string; excludes LastResort.otf and placeholder fonts
+- test_agent has two modes: pipeline QA mode (--json/--pdf flags) and testcase regression mode (--testcase flag)
 
-- [x] **consolidator**：已实现（pdf_translator_parse/consolidator.py）。
-      已知问题：`_ends_hard` 对幻灯片子弹点过于保守（句号结尾就停止合并），
-      导致同列的 Planning/Perception 子弹点没有并入标题块。待调参。
-- [ ] **space_planner.py**：文件还不存在，layout_agent.py 里的 topology 逻辑待拆出。
-- [ ] **agent registry**：architect 激活可选 agent 的机制设计好了但没实现。
-- [ ] **QA → 重翻闭环**：QA 发现问题后自动重翻失败的块。
+## Agent 架构设计
 
-## 测试文件
+**常驻核心 agent**：parse、consolidate、translate、space_planner、layout、test——每次 pipeline 都跑，不变。
 
-`/Users/qirui/Downloads/【成果物4】ワールドモデルについての補足説明.pdf`
-8页，自动驾驶/AI 领域，日→中。architect 跑过，plan.json 在 /tmp/pipeline_test/。
+**按需专项 agent**（coordinator 根据 test_report 决定是否招募）：
 
-## 代码里值得注意的地方
+| Agent | 触发条件 | 职责 |
+|-------|---------|------|
+| retry_agent | test_agent 标记翻译质量不合格的块 | 对指定 block 重新翻译，局部重渲染 |
+| term_agent | 文档属于高度专业化技术领域 | 预提取领域术语和缩写，生成词表注入 translate_agent prompt |
+| batch_agent | 文档超过 50 页 | 将 translate 步骤拆分并行分段处理 |
 
-- `pdf_translator_*/` 四个目录结构重复，是历史演化产物，根目录的 `pdf_translator.py` 是更早的单体版本
-- Prompt 已升级为商业级（本 session 改的），在 translate_agent.py 和 review_translation.py
-- architect 跑真实子进程，它调用的 claude 和你不是同一个实例，没有上下文共享
+**治理规则**：
+- 专项 agent 由 coordinator 招募，不自主触发其他 agent
+- 反馈环不在 agent 内部闭合，决策权在 coordinator
+- 只招聘有明确需求的 agent，不为假设需求预建
+- 所有新 agent 的 I/O 合约先定义，再实现
+
+## TODO
+
+- [ ] consolidator: `_ends_hard` too conservative for bullet points (stops merging on period) — needs tuning
+- [ ] agent registry: mechanism for activating optional agents is designed but not implemented
+- [ ] QA → re-translate loop: automatic re-translation of blocks flagged by test_agent coverage_check
+
+## Test Files
+
+All test data lives under `testdata/`. Structure: `source.pdf`, `work/` (intermediate files), `output.pdf`.
+
+| Name | Pages | Direction | Work files |
+|------|-------|-----------|------------|
+| 成果物1 | ~68 | ja→zh | source + output only |
+| 成果物3 | 88 | en→ja | parsed, translated, qa |
+| 成果物4 | 8 | ja→zh | parsed, translated, qa |

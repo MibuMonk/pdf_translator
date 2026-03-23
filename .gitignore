@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 *.transcache.json
 *.pdf
+.DS_Store
+
+# Intermediate pipeline outputs (regenerable from source PDFs)
+testdata/*/work/
+testdata/*/work_ja/
+
+# Debug artifacts
+testdata/*/page*_fixed.png

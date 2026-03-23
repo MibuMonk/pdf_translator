@@ -45,6 +45,81 @@ def _is_trivially_invariant(text: str) -> bool:
     return bool(re.match(r'^[\d\s\.\,\:\;\!\?\-\+\=\%\(\)\[\]\/\\\"\' ]*$', text))
 
 
+def _needs_translation(text: str) -> bool:
+    """Return True if text contains translatable natural-language words.
+
+    Used to detect blocks where the LLM returned source text unchanged.
+    A text "needs translation" if it has alphabetic words beyond pure
+    acronyms/model-numbers — i.e. contains lowercase letters or is longer
+    than a short identifier.
+    """
+    stripped = text.strip()
+    if not stripped or _is_trivially_invariant(stripped):
+        return False
+    # Contains at least some lowercase letters → has real words to translate
+    if re.search(r'[a-z]', stripped):
+        return True
+    # All-uppercase but long with spaces → likely a title/phrase, not just "KPI"
+    if len(stripped) > 10 and ' ' in stripped:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Span-aware translation helpers
+# ---------------------------------------------------------------------------
+
+_SPAN_TAG_RE = re.compile(r'<s(\d+)>(.*?)</s\1>', re.DOTALL)
+
+# Newline preservation: use a placeholder that the LLM will pass through unchanged.
+# This avoids relying on the LLM to correctly reproduce \n in its JSON output.
+_NEWLINE_PLACEHOLDER = "⏎"
+
+
+def _protect_newlines(text: str) -> str:
+    """Replace real newlines with a placeholder before sending to LLM."""
+    return text.replace("\n", _NEWLINE_PLACEHOLDER)
+
+
+def _restore_newlines(text: str) -> str:
+    """Restore newlines from placeholder after getting LLM output."""
+    return text.replace(_NEWLINE_PLACEHOLDER, "\n")
+
+
+def _build_tagged_text(color_spans: list) -> str:
+    """Wrap each span's text with <s1>, <s2>, ... tags."""
+    parts = []
+    for i, span in enumerate(color_spans, 1):
+        parts.append(f"<s{i}>{span['text']}</s{i}>")
+    return "".join(parts)
+
+
+def _parse_tagged_translation(tagged: str, color_spans: list) -> list:
+    """Parse LLM output with <s1>...</s1> tags back into translated_spans.
+
+    Returns list of {"text": str, "color": [R,G,B]} or empty list on failure.
+    """
+    matches = _SPAN_TAG_RE.findall(tagged)
+    if not matches:
+        return []
+
+    result = []
+    for idx_str, text in matches:
+        idx = int(idx_str) - 1  # 0-based
+        if idx < 0 or idx >= len(color_spans):
+            return []  # malformed — fallback
+        result.append({
+            "text": text,
+            "color": list(color_spans[idx]["color"]),
+        })
+
+    # Must have same number of spans as original
+    if len(result) != len(color_spans):
+        return []
+
+    return result
+
+
 def _call_claude_translate(
     batch: list,
     src_name: str,
@@ -57,12 +132,24 @@ def _call_claude_translate(
     batch: list of (original_index, text) tuples
     Returns dict mapping local batch index -> translated text.
     """
-    input_items = [{"id": k, "text": t} for k, (_, t) in enumerate(batch)]
+    input_items = [{"id": k, "text": _protect_newlines(t)} for k, (_, t) in enumerate(batch)]
     input_json = json.dumps(input_items, ensure_ascii=False)
 
     context_block = ""
     if context_section:
         context_block = f"\n参考术语与背景知识：\n{context_section}\n"
+
+    # Detect if any batch item contains span tags
+    has_span_tags = any('<s1>' in t for _, t in batch)
+    span_instruction = ""
+    if has_span_tags:
+        span_instruction = (
+            f"\n**分段标记保持**\n"
+            f"- 部分文本含有 <s1>...</s1><s2>...</s2> 等分段标记\n"
+            f"- 翻译时必须保留所有 <sN>...</sN> 标记，数量和顺序不变\n"
+            f"- 每个标记内的文本独立翻译，标记本身原样输出\n"
+            f"- 标记之间不要添加额外空格或换行\n\n"
+        )
 
     prompt = (
         f"你是一位资深演示文稿本地化专家，具备丰富的企业级幻灯片翻译经验，熟悉技术、商业与工程领域术语。\n\n"
@@ -70,17 +157,23 @@ def _call_claude_translate(
         f"将以下幻灯片文本从 {src_name} 翻译成 {tgt_name}。\n\n"
         f"## 翻译规范\n\n"
         f"**格式保真（最高优先级）**\n"
-        f"- 换行符（\\n）必须原样保留，不得增减\n"
+        f"- 换行符标记（{_NEWLINE_PLACEHOLDER}）必须原样保留，位置和数量不得改变\n"
         f"- 数字、单位、产品型号、代码片段保持原样\n"
         f"- 项目符号（•、-、▶ 等）及其后的空格保持原样\n\n"
+        f"{span_instruction}"
+        f"**必须翻译（关键规则）**\n"
+        f"- 每一条文本都必须翻译成 {tgt_name}，禁止原样返回源文本\n"
+        f"- 即使文本包含品牌名、缩略词或专有名词，其中的通用词/描述性部分也必须翻译\n"
+        f"  例：\"Cloud Data Infra:\" → \"クラウドデータ基盤：\"（不能原样返回）\n"
+        f"  例：\"DIS, Data Ingestion Service\" → \"DIS（データ取り込みサービス）\"\n"
+        f"  例：\"SOP Vehicle\" → \"SOP 車両\" / \"量产车辆\"\n"
+        f"- 只有纯数字、标点、符号构成的文本才可以原样输出\n\n"
         f"**术语准确性**\n"
         f"- 专业术语使用行业标准译名\n"
-        f"- 人名、品牌名、型号等专有名词保持原文\n"
-        f"- 常用缩略词可保留原文（如 AI、ROI、KPI）\n\n"
+        f"- 品牌名（如 Momenta）、产品型号、纯缩略词（如 AI, KPI）可保留原文，但周围的描述性文字必须翻译\n\n"
         f"**幻灯片语言风格**\n"
         f"- 简洁精炼，避免冗长；标题类文本尤其要简短有力\n"
         f"- 自然流畅，符合 {tgt_name} 母语者表达习惯\n"
-        f"- 纯数字、标点、符号构成的文本：原样输出，不翻译\n"
         f"{context_block}\n"
         f"## 输入格式\n"
         f"JSON 数组，每个元素有 id 和 text 字段。\n\n"
@@ -102,7 +195,7 @@ def _call_claude_translate(
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         parsed = json.loads(raw)
-        return {item["id"]: item["text"] for item in parsed}
+        return {item["id"]: _restore_newlines(item["text"]) for item in parsed}
 
     except subprocess.TimeoutExpired:
         if depth < 2 and len(batch) > 1:
@@ -136,6 +229,47 @@ def _call_claude_translate(
         return {k: t for k, (_, t) in enumerate(batch)}
 
 
+def _call_claude_retry_translate(
+    batch: list,
+    src_name: str,
+    tgt_name: str,
+    claude_cli: str,
+) -> dict:
+    """Retry translation with a forceful prompt for blocks the LLM left unchanged."""
+    input_items = [{"id": k, "text": _protect_newlines(t)} for k, (_, t) in enumerate(batch)]
+    input_json = json.dumps(input_items, ensure_ascii=False)
+
+    prompt = (
+        f"你是翻译质量审核员。以下文本在上一轮翻译中被错误地原样返回，没有翻译。\n\n"
+        f"## 严格要求\n"
+        f"- 每一条文本必须翻译成 {tgt_name}，绝对禁止原样返回\n"
+        f"- 换行符标记（{_NEWLINE_PLACEHOLDER}）必须原样保留\n"
+        f"- 品牌名（如 Momenta）和纯缩略词（如 DIS, FDC）可以保留，但描述性文字必须翻译\n"
+        f"- 例：\"Cloud Data Infra:\" → \"クラウドデータ基盤：\"\n"
+        f"- 例：\"SOP Vehicle\" → \"量産車両\"\n"
+        f"- 例：\"DIS, Data Ingestion Service\" → \"DIS（データ取り込みサービス）\"\n\n"
+        f"## 输入\n{input_json}\n\n"
+        f"## 输出\n"
+        f"仅返回 JSON 数组，将每个 text 替换为 {tgt_name} 译文。禁止输出任何说明文字。\n"
+    )
+
+    try:
+        result = subprocess.run(
+            [claude_cli, "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        raw = result.stdout.strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        parsed = json.loads(raw)
+        return {item["id"]: _restore_newlines(item["text"]) for item in parsed}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError) as exc:
+        print(f"    [retry parse error] {exc} — keeping originals.", flush=True)
+        return {k: t for k, (_, t) in enumerate(batch)}
+
+
 def _save_cache(cache: dict, cache_path: Path) -> None:
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
@@ -164,7 +298,12 @@ def translate_texts(
     to_translate = []
     for i, text in enumerate(texts):
         if text in cache:
-            results[i] = cache[text]
+            cached = cache[text]
+            # Reject poisoned cache: source == translation for translatable text
+            if cached == text and _needs_translation(text):
+                to_translate.append((i, text))
+            else:
+                results[i] = cached
         elif _is_trivially_invariant(text):
             results[i] = text
         else:
@@ -191,6 +330,41 @@ def translate_texts(
 
         # Save cache after every batch
         _save_cache(cache, cache_path)
+
+    # Retry: detect blocks where LLM returned source text unchanged
+    unchanged = []
+    for i, text in enumerate(texts):
+        if results[i] is not None and results[i] == text and _needs_translation(text):
+            unchanged.append((i, text))
+
+    if unchanged:
+        print(
+            f"    [retry] {len(unchanged)} texts returned unchanged, retrying with stricter prompt...",
+            flush=True,
+        )
+        for batch_start in range(0, len(unchanged), batch_size):
+            retry_batch = unchanged[batch_start: batch_start + batch_size]
+            retry_results = _call_claude_retry_translate(
+                retry_batch, src_name, tgt_name, claude_cli
+            )
+            for local_idx, translated in retry_results.items():
+                orig_idx, orig_text = retry_batch[local_idx]
+                if translated != orig_text:  # Only accept if actually changed
+                    results[orig_idx] = translated
+                    cache[orig_text] = translated
+
+            _save_cache(cache, cache_path)
+
+        # Report remaining unchanged after retry
+        still_unchanged = sum(
+            1 for i, text in enumerate(texts)
+            if results[i] is not None and results[i] == text and _needs_translation(text)
+        )
+        if still_unchanged:
+            print(
+                f"    [retry] {still_unchanged} texts still unchanged after retry.",
+                flush=True,
+            )
 
     # Fill any remaining None with original (safety fallback)
     for i, text in enumerate(texts):
@@ -283,23 +457,72 @@ def main():
             continue
 
         page_num = page.get("page", page_idx + 1)
-        texts = [block.get("text", "") for block in blocks]
-        print(f"  [Page {page_num}] translating {len(blocks)} blocks...", flush=True)
 
-        translated_texts = translate_texts(
-            texts=texts,
-            src=args.src,
-            tgt=args.tgt,
-            cache=cache,
-            cache_path=cache_path,
-            context=context_text,
-            batch_size=args.batch,
-            claude_cli=claude_cli,
-        )
+        # Separate blocks into plain (no multi-color spans) and span-aware
+        plain_indices = []
+        span_indices = []
+        for i, block in enumerate(blocks):
+            cs = block.get("color_spans", [])
+            if len(cs) > 1:
+                span_indices.append(i)
+            else:
+                plain_indices.append(i)
 
-        for block, translated_text in zip(blocks, translated_texts):
-            # Guarantee `translated` is always a string, even on failure
-            block["translated"] = translated_text if isinstance(translated_text, str) else ""
+        # --- Translate plain blocks (original batch flow) ---
+        plain_texts = [blocks[i].get("text", "") for i in plain_indices]
+        print(f"  [Page {page_num}] translating {len(blocks)} blocks "
+              f"({len(span_indices)} span-aware)...", flush=True)
+
+        if plain_texts:
+            plain_translated = translate_texts(
+                texts=plain_texts,
+                src=args.src,
+                tgt=args.tgt,
+                cache=cache,
+                cache_path=cache_path,
+                context=context_text,
+                batch_size=args.batch,
+                claude_cli=claude_cli,
+            )
+            for idx_in_plain, orig_idx in enumerate(plain_indices):
+                t = plain_translated[idx_in_plain]
+                blocks[orig_idx]["translated"] = t if isinstance(t, str) else ""
+
+        # --- Translate span-aware blocks (tagged text) ---
+        if span_indices:
+            span_tagged_texts = []
+            for i in span_indices:
+                cs = blocks[i]["color_spans"]
+                span_tagged_texts.append(_build_tagged_text(cs))
+
+            span_translated = translate_texts(
+                texts=span_tagged_texts,
+                src=args.src,
+                tgt=args.tgt,
+                cache=cache,
+                cache_path=cache_path,
+                context=context_text,
+                batch_size=args.batch,
+                claude_cli=claude_cli,
+            )
+
+            for idx_in_span, orig_idx in enumerate(span_indices):
+                block = blocks[orig_idx]
+                cs = block["color_spans"]
+                raw_translation = span_translated[idx_in_span]
+                if not isinstance(raw_translation, str):
+                    raw_translation = ""
+
+                # Try to parse span tags from LLM output
+                translated_spans = _parse_tagged_translation(raw_translation, cs)
+                if translated_spans:
+                    block["translated_spans"] = translated_spans
+                    # Also set `translated` for compatibility (concatenate span texts)
+                    block["translated"] = "".join(s["text"] for s in translated_spans)
+                else:
+                    # Fallback: strip any leftover tags and use as plain translation
+                    plain_text = re.sub(r'</?s\d+>', '', raw_translation)
+                    block["translated"] = plain_text
 
     # Ensure every block that was not processed also has a `translated` field
     for page in pages:

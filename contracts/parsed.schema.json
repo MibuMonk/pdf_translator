@@ -54,7 +54,23 @@
         "align":        { "type": "integer", "enum": [0, 1, 2], "description": "0=left 1=center 2=right" },
         "bbox":         { "$ref": "#/$defs/bbox" },
         "redact_bboxes":{ "type": "array", "items": { "$ref": "#/$defs/bbox" } },
-        "stream_rank":  { "type": "integer" }
+        "stream_rank":  { "type": "integer" },
+        "color_spans":  {
+          "type": "array",
+          "description": "Per-span text and color for multi-color blocks. Omitted when block has only one color.",
+          "items": {
+            "type": "object",
+            "required": ["text", "color"],
+            "properties": {
+              "text": { "type": "string", "description": "The actual text content of this span" },
+              "color": {
+                "type": "array",
+                "items": { "type": "number", "minimum": 0, "maximum": 1 },
+                "minItems": 3, "maxItems": 3
+              }
+            }
+          }
+        }
       }
     }
   }

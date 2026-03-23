@@ -12,6 +12,22 @@
     "translated": {
       "type": "string",
       "description": "Translated text. Empty string if translation failed. MUST preserve \\n structure."
+    },
+    "translated_spans": {
+      "type": "array",
+      "description": "Per-span translated text with color, produced for multi-color blocks. Optional.",
+      "items": {
+        "type": "object",
+        "required": ["text", "color"],
+        "properties": {
+          "text": { "type": "string" },
+          "color": {
+            "type": "array",
+            "items": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minItems": 3, "maxItems": 3
+          }
+        }
+      }
     }
   }
 }

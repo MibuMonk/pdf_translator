@@ -1,0 +1,238 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "test_report.schema.json",
+  "description": "Output of test_agent. Structural regression checks + translation QA.",
+  "type": "object",
+  "required": ["version", "testcase", "run_date", "results", "summary", "issue_results"],
+  "properties": {
+    "version":  { "type": "string" },
+    "testcase": { "type": ["string", "null"] },
+    "run_date": { "type": "string" },
+    "results": {
+      "type": "array",
+      "description": "Structural regression check results from issues/registry.json.",
+      "items": {
+        "type": "object",
+        "required": ["issue_id", "title", "severity", "registry_status", "check_result"],
+        "properties": {
+          "issue_id":        { "type": "string" },
+          "title":           { "type": "string" },
+          "severity":        { "type": "string" },
+          "registry_status": { "type": "string" },
+          "check_result": {
+            "type": "string",
+            "enum": ["pass", "fail", "skipped"]
+          },
+          "details": {},
+          "reason":  { "type": "string" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "passed", "failed", "skipped"],
+      "properties": {
+        "total":   { "type": "integer" },
+        "passed":  { "type": "integer" },
+        "failed":  { "type": "integer" },
+        "skipped": { "type": "integer" }
+      }
+    },
+    "issue_results": {
+      "type": "object",
+      "description": "Translation QA checks (coverage_check, quality_check) and optional regression_check.",
+      "required": ["coverage_check", "quality_check", "linebreak_consistency_check", "mixed_language_check", "terminology_consistency_check"],
+      "properties": {
+        "regression_check": {
+          "type": "object",
+          "description": "Regression check results against saved baseline (only present when baseline exists).",
+          "required": ["check_result", "details"],
+          "properties": {
+            "check_result": { "type": "string", "enum": ["pass", "fail"] },
+            "details": {
+              "type": "object",
+              "properties": {
+                "error_count":   { "type": "integer" },
+                "warning_count": { "type": "integer" },
+                "findings":      { "type": "array" }
+              }
+            }
+          }
+        },
+        "coverage_check": {
+          "type": "object",
+          "required": ["check_result", "details"],
+          "properties": {
+            "check_result": { "type": "string", "enum": ["pass", "fail"] },
+            "details": {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "object",
+                  "properties": {
+                    "total_blocks":      { "type": "integer" },
+                    "translated_blocks": { "type": "integer" },
+                    "coverage_pct":      { "type": "number", "minimum": 0, "maximum": 100 },
+                    "issue_count":       { "type": "integer" },
+                    "pass":              { "type": "boolean" },
+                    "per_page":          { "type": "array" }
+                  }
+                },
+                "translation_issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["page", "block_id", "type", "severity", "text", "translated"],
+                    "properties": {
+                      "page":       { "type": "integer" },
+                      "block_id":   { "type": "string" },
+                      "type": {
+                        "type": "string",
+                        "enum": ["missing_translation", "unchanged_translation", "likely_truncated", "suspiciously_short"]
+                      },
+                      "severity": { "type": "string", "enum": ["critical", "warning"] },
+                      "text":       { "type": "string" },
+                      "translated": { "type": "string" }
+                    }
+                  }
+                },
+                "self_eval": {
+                  "type": "object",
+                  "properties": {
+                    "retry_candidates": { "type": "array", "items": { "type": "string" } },
+                    "confidence":       { "type": "number", "minimum": 0, "maximum": 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "linebreak_consistency_check": {
+          "type": "object",
+          "description": "Detects line breaks lost during translation (especially before bullet markers).",
+          "required": ["check_result", "details"],
+          "properties": {
+            "check_result": { "type": "string", "enum": ["pass", "fail"] },
+            "details": {
+              "type": "object",
+              "properties": {
+                "issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["page", "block_id", "type", "severity", "original_breaks", "translated_breaks", "text_preview"],
+                    "properties": {
+                      "page":              { "type": "integer" },
+                      "block_id":          { "type": "string" },
+                      "type":              { "type": "string", "enum": ["missing_bullet_break", "linebreak_count_mismatch"] },
+                      "severity":          { "type": "string", "enum": ["error", "warning"] },
+                      "original_breaks":   { "type": "integer" },
+                      "translated_breaks": { "type": "integer" },
+                      "text_preview":      { "type": "string" }
+                    }
+                  }
+                },
+                "total_checked":            { "type": "integer" },
+                "blocks_with_missing_breaks": { "type": "integer" }
+              }
+            }
+          }
+        },
+        "mixed_language_check": {
+          "type": "object",
+          "description": "Detects untranslated English phrases in CJK translations.",
+          "required": ["check_result", "details"],
+          "properties": {
+            "check_result": { "type": "string", "enum": ["pass", "fail"] },
+            "details": {
+              "type": "object",
+              "properties": {
+                "issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["page", "block_id", "type", "severity", "matched_text", "text_preview"],
+                    "properties": {
+                      "page":         { "type": "integer" },
+                      "block_id":     { "type": "string" },
+                      "type":         { "type": "string", "enum": ["untranslated_heading", "english_phrase_in_translation"] },
+                      "severity":     { "type": "string", "enum": ["error", "warning"] },
+                      "matched_text": { "type": "string" },
+                      "text_preview": { "type": "string" }
+                    }
+                  }
+                },
+                "total_checked":            { "type": "integer" },
+                "blocks_with_mixed_language": { "type": "integer" }
+              }
+            }
+          }
+        },
+        "terminology_consistency_check": {
+          "type": "object",
+          "description": "Detects inconsistent translations of the same term across the document.",
+          "required": ["check_result", "details"],
+          "properties": {
+            "check_result": { "type": "string", "enum": ["pass", "fail"] },
+            "details": {
+              "type": "object",
+              "properties": {
+                "variant_pair_issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type":              { "type": "string" },
+                      "severity":          { "type": "string" },
+                      "term_description":  { "type": "string" },
+                      "variant_a":         { "type": "string" },
+                      "variant_a_count":   { "type": "integer" },
+                      "variant_b":         { "type": "string" },
+                      "variant_b_count":   { "type": "integer" },
+                      "sample_locations_a": { "type": "array" },
+                      "sample_locations_b": { "type": "array" }
+                    }
+                  }
+                },
+                "dynamic_issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type":           { "type": "string" },
+                      "severity":       { "type": "string" },
+                      "english_term":   { "type": "string" },
+                      "translations":   { "type": "array" }
+                    }
+                  }
+                },
+                "total_checked": { "type": "integer" }
+              }
+            }
+          }
+        },
+        "quality_check": {
+          "type": "object",
+          "required": ["check_result", "details"],
+          "properties": {
+            "check_result": { "type": "string", "enum": ["pass", "fail"] },
+            "details": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "page":       { "type": "integer" },
+                  "block_id":   { "type": "string" },
+                  "type":       { "type": "string" },
+                  "severity":   { "type": "string" },
+                  "text":       { "type": "string" },
+                  "translated": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
