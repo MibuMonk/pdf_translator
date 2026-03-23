@@ -94,8 +94,9 @@ _SPECIAL_REPL = [
     (re.compile(r"[Δδ]"), "△"),
 ]
 
-_BULLET_RE = re.compile(r"([\u2022\u25cf\u25cb\u25a0\u25a1\u2023\u25e6\u2043•])\s+")
-_EN_CJK_RE = re.compile(r"([A-Za-z0-9])\s+([\u3000-\u9fff\uac00-\ud7af])")
+_BULLET_RE  = re.compile(r"([\u2022\u25cf\u25cb\u25a0\u25a1\u2023\u25e6\u2043•])\s+")
+_EN_CJK_RE  = re.compile(r"([A-Za-z0-9])\s+([\u3000-\u9fff\uac00-\ud7af])")
+_CJK_EN_RE  = re.compile(r"([\u3000-\u9fff\uac00-\ud7af])\s+([A-Za-z0-9])")
 
 
 def preprocess(text: str) -> str:
@@ -107,8 +108,9 @@ def preprocess(text: str) -> str:
     # 2. bullet + whitespace → bullet + \xa0
     text = _BULLET_RE.sub(lambda m: m.group(1) + "\xa0", text)
 
-    # 3. English word + space + CJK → \xa0 (non-breaking space to prevent mid-word wrap)
-    text = _EN_CJK_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)
+    # 3. Non-breaking spaces around mixed CJK/ASCII boundaries to prevent mid-phrase wrap
+    text = _EN_CJK_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # ASCII→CJK
+    text = _CJK_EN_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # CJK→ASCII
 
     # 4. Strip leading spaces per line
     lines = text.split("\n")
