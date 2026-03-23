@@ -30,9 +30,6 @@ _LINE_HEIGHT_FACTOR = 1.4
 _MARGIN = 1.0
 _Y_GAP_MERGE = 6.0       # pixels — adjacent block merge threshold
 _X_OVERLAP_RATIO = 0.30  # 30% x-overlap for adjacent merge
-_REDACT_BG_OVERLAP_THRESHOLD = 0.30  # if redact bbox overlaps background by this fraction → transparent fill
-_TABLE_CELL_X_MIN_GAP = 60.0         # px — blocks this far apart horizontally are in different columns
-_TABLE_CELL_Y_TOL     = 8.0          # px — y0 tolerance for same-row detection
 
 
 # ---------------------------------------------------------------------------
@@ -85,37 +82,6 @@ def _truncate_to_em_width(text: str, max_em: float) -> str:
             return text[:i] + "…"
         total += w
     return text
-
-
-# ---------------------------------------------------------------------------
-# Layout helpers
-# ---------------------------------------------------------------------------
-
-def _rect_overlap_fraction(r: fitz.Rect, obstacles: list) -> float:
-    """Return the fraction of r's area covered by any obstacle rectangle."""
-    area = r.width * r.height
-    if area <= 0:
-        return 0.0
-    for obs in obstacles:
-        inter = r & obs
-        if not inter.is_empty:
-            frac = (inter.width * inter.height) / area
-            if frac > 0:
-                return frac  # return first significant hit (fast path)
-    return 0.0
-
-
-def _is_table_cell(block: dict, all_blocks: list) -> bool:
-    """True if block has another block at similar y0 but distant x0 (table row)."""
-    by0 = block["bbox"][1]
-    bx0 = block["bbox"][0]
-    for other in all_blocks:
-        if other is block:
-            continue
-        if (abs(other["bbox"][1] - by0) <= _TABLE_CELL_Y_TOL
-                and abs(other["bbox"][0] - bx0) > _TABLE_CELL_X_MIN_GAP):
-            return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -442,24 +408,11 @@ def render_page(
     image_obstacles = [fitz.Rect(b) for b in page_data.get("image_obstacles", [])]
 
     # ------------------------------------------------------------------
-    # Step 1: Redact — transparent fill where bbox overlaps background visuals
+    # Step 1: Redact
     # ------------------------------------------------------------------
-    # Collect filled drawing rectangles as additional visual obstacles
-    drawings_early = page.get_drawings()
-    draw_obstacles = [
-        fitz.Rect(d["rect"]) for d in drawings_early
-        if d.get("fill") is not None and d.get("rect")
-    ]
-    all_obstacles = image_obstacles + draw_obstacles
-
     for block in blocks:
         for rb in block.get("redact_bboxes", []):
-            r = fitz.Rect(rb)
-            if _rect_overlap_fraction(r, all_obstacles) > _REDACT_BG_OVERLAP_THRESHOLD:
-                # Transparent: removes text layer but preserves visual background
-                page.add_redact_annot(r, fill=None)
-            else:
-                page.add_redact_annot(r)
+            page.add_redact_annot(fitz.Rect(rb))
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
     # ------------------------------------------------------------------
@@ -562,17 +515,11 @@ def render_page(
             plan_page = None  # trigger fallback below
 
     if plan_page is None:
+        drawings = page.get_drawings()
         topo_result = TopologyAnalyzer(page_rect).analyze(
-            bboxes, aligns, drawings_early, image_obstacles
+            bboxes, aligns, drawings, image_obstacles
         )
         insert_bboxes = topo_result.insert_bboxes
-
-    # Table cells: cap insert_bbox to original bbox (no Voronoi expansion into neighbours)
-    table_cell_mask = [_is_table_cell(b, blocks) for b in blocks]
-    insert_bboxes = [
-        bboxes[i] if table_cell_mask[i] else insert_bboxes[i]
-        for i in range(len(insert_bboxes))
-    ]
 
     # ------------------------------------------------------------------
     # Step 9: Phase 2 — compute fitting_sizes via VisualOptimizer
@@ -589,21 +536,12 @@ def render_page(
     title_mask = [i in title_indices for i in range(len(fitting_sizes))]
     render_sizes = visual.consistency_map(fitting_sizes, source_sizes, title_mask)
 
-    # Step 10b: Parallel sibling normalization — unify sizes and colors across
-    # blocks sharing the same column (x0) or row (y0)
-    render_sizes, source_colors = visual.parallel_normalize(
-        render_sizes, source_colors, insert_bboxes
-    )
-
     # ------------------------------------------------------------------
     # Step 11: Phase 3 — render
     # ------------------------------------------------------------------
     for idx, (ibbox, text, rs, align) in enumerate(
         zip(insert_bboxes, translated_texts, render_sizes, aligns)
     ):
-        # Fall back to original text if translation is empty (keeps table cells visible)
-        if not text.strip():
-            text = preprocess(blocks[idx].get("text", ""))
         src_color = source_colors[idx] if idx < len(source_colors) else (0.0, 0.0, 0.0)
         color = visual.adjust_color(src_color)
         insert_text_fitting(
