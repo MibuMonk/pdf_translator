@@ -14,7 +14,7 @@ Working agents own their implementation. They may freely change internal algorit
 ## Pipeline
 
 ```
-parse_agent → consolidator → translate ∥ space_planner → render_agent → test_agent
+parse_agent → consolidator → translate ∥ space_planner → layout_agent → test_agent
 ```
 
 - `translate` and `space_planner` run in parallel; all others sequential
@@ -24,9 +24,9 @@ parse_agent → consolidator → translate ∥ space_planner → render_agent �
 
 | Agent | Directory | Output | LLM? |
 |-------|-----------|--------|------|
-| parse_agent | agents/ | parsed.json | No |
-| consolidator | agents/ | parsed.json (overwrite) | No |
-| translate_agent | agents/ | translated.json | Yes |
+| parse_agent | agents/ | {stem}.parsed.json | No |
+| consolidator | agents/ | {stem}.parsed.json (overwrite) | No |
+| translate_agent | agents/ | {stem}.translated.json | Yes |
 | space_planner | agents/ | layout_plan.json | No |
 | layout_agent | agents/ | output.pdf | No |
 | test_agent | agents/ | test_report.json | No |
@@ -42,8 +42,8 @@ All schemas in `contracts/`. Agents self-validate using `contracts/validate.py`.
 |--------|----------|----------|
 | parsed.schema.json | parse_agent, consolidator | consolidator, translate_agent, space_planner |
 | consolidator_log.schema.json | consolidator | (informational) |
-| translated.schema.json | translate_agent | render_agent, test_agent |
-| layout_plan.schema.json | space_planner | render_agent |
+| translated.schema.json | translate_agent | layout_agent, test_agent |
+| layout_plan.schema.json | space_planner | layout_agent |
 | test_report.schema.json | test_agent | (final output) |
 
 ## Architectural Constraints
@@ -68,6 +68,7 @@ Consolidator must produce semantically complete blocks before translation. layou
 
 | Agent | 触发条件 | 职责 |
 |-------|---------|------|
+| review_agent | coordinator 需要人类视角审查 | 用 LLM 视觉审查 output.pdf，从目标读者角度评估可读性和专业性 |
 | retry_agent | test_agent 标记翻译质量不合格的块 | 对指定 block 重新翻译，局部重渲染 |
 | term_agent | 文档属于高度专业化技术领域 | 预提取领域术语和缩写，生成词表注入 translate_agent prompt |
 | batch_agent | 文档超过 50 页 | 将 translate 步骤拆分并行分段处理 |
@@ -87,9 +88,10 @@ Consolidator must produce semantically complete blocks before translation. layou
 ## Test Files
 
 All test data lives under `testdata/`. Structure: `source.pdf`, `work/` (intermediate files), `output.pdf`.
+Work files and intermediate outputs are gitignored (regenerable). Only `baseline/` is version-controlled.
 
-| Name | Pages | Direction | Work files |
-|------|-------|-----------|------------|
-| 成果物1 | ~68 | ja→zh | source + output only |
-| 成果物3 | 88 | en→ja | parsed, translated, qa |
-| 成果物4 | 8 | ja→zh | parsed, translated, qa |
+| Name | Pages | Direction | Notes |
+|------|-------|-----------|-------|
+| 成果物1 | ~68 | ja→zh | Primary test case. Also has work_ja/ (zh→ja reverse) |
+| 成果物3 | 88 | en→ja | Legacy work files (old naming: parsed.json) |
+| 成果物4 | 8 | ja→zh | Has regression baseline/ (committed) |
