@@ -45,15 +45,46 @@ def bold(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Invariant check
+# Text weight helpers
 # ---------------------------------------------------------------------------
 
 _TRIVIAL_RE = re.compile(r'^[\d\s.,;:!?()[\]/%+\-=\\\'\"]*$')
+# Acronym-definition lines: e.g. "DDOD: Data-Driven Object Detection"
+# These are legitimately untranslated (all-caps abbreviations + ASCII expansion)
+_ACRONYM_DEF_RE = re.compile(r'^[A-Z]{2,}[0-9]*\s*:')
 
 
 def _is_trivially_invariant(text: str) -> bool:
     """Return True if text is composed only of numbers/punctuation/symbols."""
     return bool(_TRIVIAL_RE.match(text))
+
+
+def _is_acronym_definition(text: str) -> bool:
+    """True if text looks like an acronym definition line (DDOD: Data-Driven …)."""
+    return bool(_ACRONYM_DEF_RE.match(text.strip()))
+
+
+def _weighted_len(text: str) -> float:
+    """
+    Information-density-weighted character count.
+    CJK characters (kanji, hiragana, katakana, hangul) = 2.0 units each.
+    Everything else = 1.0 unit.
+    Rationale: CJK carries ~2x the semantic content per character vs ASCII,
+    so length comparisons across language pairs must be normalised.
+    """
+    total = 0.0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x3000 <= cp <= 0x9FFF    # CJK unified + hiragana/katakana
+            or 0xAC00 <= cp <= 0xD7AF  # Hangul syllables
+            or 0xF900 <= cp <= 0xFAFF  # CJK compatibility
+            or 0x20000 <= cp <= 0x2FA1F  # CJK extensions B-F
+        ):
+            total += 2.0
+        else:
+            total += 1.0
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +114,11 @@ def _check_block(page_num: int, block_id: str, block: dict) -> list[dict]:
         return issues  # further checks are meaningless without a translation
 
     # 2. unchanged_translation
+    # Skip acronym-definition lines (e.g. "DDOD: Data-Driven …") — intentionally untranslated.
     if (
         translated == text
         and not _is_trivially_invariant(text)
+        and not _is_acronym_definition(text)
         and len(text) > 5
     ):
         issues.append({
@@ -109,7 +142,13 @@ def _check_block(page_num: int, block_id: str, block: dict) -> list[dict]:
         })
 
     # 4. suspiciously_short
-    if len(text) > 20 and len(translated) < len(text) * 0.3:
+    # Use information-density-weighted lengths so CJK→CJK and ASCII→CJK
+    # translations are not falsely flagged (CJK chars carry ~2x ASCII information).
+    # Threshold: translated weighted-length < 25% of source weighted-length,
+    # only checked when source is substantive (weighted > 40 units ≈ 20+ CJK chars).
+    wt_src = _weighted_len(text)
+    wt_trl = _weighted_len(translated)
+    if wt_src > 40 and wt_trl < wt_src * 0.25:
         issues.append({
             "page":       page_num,
             "block_id":   block_id,
