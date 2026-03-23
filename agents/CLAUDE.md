@@ -35,22 +35,7 @@ parse_agent → consolidator → translate_agent ∥ space_planner → layout_ag
 - **text_too_small**: 阈值 7.5pt（非 8.0），容忍 PyMuPDF 浮点精度误差（8pt 渲染后读回可能为 7.99x）。
 - **content_truncated**: 使用 PDF 中实际渲染的 font_size（而非 translated.json 的 source font_size）估算 bbox 容量，避免因 layout_agent 缩小字号后误判。面积 < 500px² 跳过，< 2000px² 降级为 warning，ratio > 3.0 且面积 >= 2000px² 才报 error。
 
-## Lessons Learned (Bug Fixes)
+## Lessons Learned
 
-### parse_agent: 合并不同颜色 block 时必须生成 color_spans
-
-当两个相邻 block 各自是单色（没有 color_spans）但颜色不同时，合并后必须合成 color_spans。否则合并结果只保留一个 color，丢失另一个 block 的颜色信息。
-
-规则：合并前检查两个 block 的 color 是否相同。不同时，即使双方都没有 color_spans，也要从各自的 text + color 合成 color_spans。
-
-### translate_agent: 用占位符保护换行符过 LLM 边界
-
-源文本中的 `\n` 序列化为 JSON 后变成 `\\n`，LLM 经常在输出中丢弃它们。不要依赖 LLM 忠实保留 JSON 转义字符。
-
-修复方式：发送前将 `\n` 替换为可见占位符（`⏎`），LLM 返回后再还原。选择占位符时确保它不会出现在正常文本中。
-
-### layout_agent: 禁止截断文字，必须缩放
-
-文字溢出 bbox 时，绝对不能用 `...` 截断——截断会静默丢失内容。正确做法是缩小字号（最低 4pt）+ 自动换行。`_truncate_to_em_width` 方法是错误的，`_find_fitting_size` + wrapping 才是正确路径。
-
-另外：`insert_text_multicolor` 会直接拼接各 span 的 text。如果多色 block 的 span 之间需要换行，`\n` 必须包含在 span text 的边界内（通常附加到前一个 span 的末尾）。否则拼接后换行会丢失，多行文字被挤到同一行。
+Agent-specific lessons are in each agent's own `<agent>.CLAUDE.md` file.
+This section is reserved for cross-agent lessons only.
