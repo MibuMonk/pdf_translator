@@ -51,7 +51,8 @@ def bold(s: str) -> str:
 _TRIVIAL_RE = re.compile(r'^[\d\s.,;:!?()[\]/%+\-=\\\'\"]*$')
 # Acronym-definition lines: e.g. "DDOD: Data-Driven Object Detection"
 # These are legitimately untranslated (all-caps abbreviations + ASCII expansion)
-_ACRONYM_DEF_RE = re.compile(r'^[A-Z]{2,}[0-9]*\s*:')
+# Matches: "ABBR: description"  OR  "ABBR\n(description)"
+_ACRONYM_DEF_RE = re.compile(r'^[A-Z]{2,}[0-9A-Z]*[\s\n]*[\(:]')
 
 
 def _is_trivially_invariant(text: str) -> bool:
@@ -131,7 +132,8 @@ def _check_block(page_num: int, block_id: str, block: dict) -> list[dict]:
         })
 
     # 3. likely_truncated
-    if translated.endswith("…"):
+    # Only flag if the source doesn't already end with "…" (would be correct preservation)
+    if translated.endswith("…") and not text.endswith("…"):
         issues.append({
             "page":       page_num,
             "block_id":   block_id,

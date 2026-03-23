@@ -30,7 +30,8 @@ MIN_ISOLATED_FS = 9.0 # blocks below this size AND isolated are diagram labels �
 HARD_ENDINGS = set(".!?。！？…")
 
 # Threshold for "missed fragment candidate": x_diff beyond column tolerance but y_gap tiny
-MISSED_FRAG_Y_GAP_MAX = 5.0  # px — very small gap signals a fragment
+MISSED_FRAG_Y_GAP_MAX  = 5.0   # px — very small gap signals a fragment
+MISSED_FRAG_X_DIFF_MAX = 120.0 # px — large x_diff means separate columns, not fragments
 
 LOG_VERSION = "1.0"
 
@@ -245,7 +246,8 @@ def _detect_missed_fragments(blocks: list, page_num: int) -> list:
     Scan all consecutive pairs of blocks (sorted by y0) on the page.
     Flag pairs where:
       - y_gap < MISSED_FRAG_Y_GAP_MAX (very close vertically — looks like one text)
-      - x_diff > X_COL_TOL (different columns — so consolidator skipped them)
+      - X_COL_TOL < x_diff <= MISSED_FRAG_X_DIFF_MAX (slightly off-column but not a
+        separate multi-column layout — large x_diff means a table row, not a fragment)
     These are candidates for fragments that consolidator may have missed.
     """
     candidates = []
@@ -255,7 +257,8 @@ def _detect_missed_fragments(blocks: list, page_num: int) -> list:
         b = sorted_blocks[i + 1]
         gap = _y_gap(a, b)
         x_diff = abs(_bbox_x0(a) - _bbox_x0(b))
-        if 0 <= gap < MISSED_FRAG_Y_GAP_MAX and x_diff > X_COL_TOL:
+        if (0 <= gap < MISSED_FRAG_Y_GAP_MAX
+                and X_COL_TOL < x_diff <= MISSED_FRAG_X_DIFF_MAX):
             candidates.append({
                 "page": page_num,
                 "block_a": a.get("id", ""),
