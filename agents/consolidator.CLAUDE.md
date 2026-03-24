@@ -15,7 +15,8 @@
   Fixed: `_should_block_merge_on_ending(prev, next)` now considers context:
   - If next starts with a bullet marker → always block merge (independent bullets)
   - If prev is a bullet (starts with marker) and next is NOT a new bullet → allow merge
-    (parser-split continuation), unless prev is very short (heading-like, < 4 chars after marker)
+    (parser-split continuation), unless prev is very short (heading-like,
+    < `BULLET_CONT_MIN_CHARS` (4) chars after stripping marker) — avoids merging headings like "• 概要。"
   - Non-bullet text retains original behavior: hard ending blocks merge
 
 ## I/O
