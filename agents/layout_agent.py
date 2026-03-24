@@ -39,22 +39,53 @@ _X_OVERLAP_RATIO = 0.30  # 30% x-overlap for adjacent merge
 # ---------------------------------------------------------------------------
 
 
+def _is_fullwidth(cp: int) -> bool:
+    """Return True if codepoint renders at full (1 em) width in CJK fonts."""
+    return (
+        0x3000 <= cp <= 0x9FFF
+        or 0xAC00 <= cp <= 0xD7AF
+        or 0xF900 <= cp <= 0xFAFF
+        or 0x20000 <= cp <= 0x2FA1F
+        or 0xFF01 <= cp <= 0xFF60  # fullwidth ASCII variants
+        or 0xFFE0 <= cp <= 0xFFE6  # fullwidth symbol variants
+    )
+
 
 def estimate_em_width(text: str) -> float:
-    """Estimate text width in em units.  CJK chars = 1.0 em, ASCII = 0.55 em."""
+    """Estimate text width in em units.  CJK/fullwidth chars = 1.0 em, ASCII = 0.55 em.
+
+    Fullwidth punctuation (U+FF01-U+FF60, U+FFE0-U+FFE6) is treated as 1.0 em
+    because CJK fonts render these at full character width.
+    """
     total = 0.0
     for ch in text:
-        cp = ord(ch)
-        if (
-            0x3000 <= cp <= 0x9FFF
-            or 0xAC00 <= cp <= 0xD7AF
-            or 0xF900 <= cp <= 0xFAFF
-            or 0x20000 <= cp <= 0x2FA1F
-        ):
+        if _is_fullwidth(ord(ch)):
             total += 1.0
         else:
             total += 0.55
     return total
+
+
+def _estimate_lines_needed(text: str, font_size: float, bbox_width: float) -> int:
+    """Estimate visual lines needed, respecting explicit newlines.
+
+    Splits text on ``\\n`` and computes wrapped lines for each segment,
+    then sums.  This avoids the bug where ``estimate_em_width`` on the
+    full text treats ``\\n`` as a 0.55-em character instead of a forced
+    line break.
+    """
+    if font_size <= 0 or bbox_width <= 0:
+        return 999
+    chars_per_line = bbox_width / font_size
+    if chars_per_line <= 0:
+        return 999
+    total_lines = 0
+    for segment in text.split("\n"):
+        em_w = estimate_em_width(segment)
+        seg_lines = math.ceil(em_w / chars_per_line) if em_w > 0 else 1
+        # An empty segment (blank line) still occupies one visual line
+        total_lines += max(seg_lines, 1)
+    return total_lines
 
 
 
@@ -172,15 +203,13 @@ def _find_fitting_size(
 
     if has_cjk(text):
         # insert_textbox with "helv" cannot measure CJK — use em-width estimation instead
-        em_w = estimate_em_width(text)
         lo, hi = min_size, base_size
         result = min_size
         for _ in range(10):
             mid = (lo + hi) / 2.0
             if mid < 0.5:
                 break
-            chars_per_line = bbox.width / mid  # 1 em = font_size px wide
-            lines_needed = math.ceil(em_w / chars_per_line) if chars_per_line > 0 else 999
+            lines_needed = _estimate_lines_needed(text, mid, bbox.width)
             if lines_needed == 1:
                 height_needed = mid  # single line: no inter-line spacing
             else:
@@ -227,16 +256,10 @@ def _find_fitting_size(
 
 
 def _estimate_text_width(text: str, font_size: float) -> float:
-    """Estimate pixel width of text. CJK = font_size, ASCII = font_size * 0.55."""
+    """Estimate pixel width of text. CJK/fullwidth = font_size, ASCII = font_size * 0.55."""
     w = 0.0
     for ch in text:
-        cp = ord(ch)
-        if (
-            0x3000 <= cp <= 0x9FFF
-            or 0xAC00 <= cp <= 0xD7AF
-            or 0xF900 <= cp <= 0xFAFF
-            or 0x20000 <= cp <= 0x2FA1F
-        ):
+        if _is_fullwidth(ord(ch)):
             w += font_size
         else:
             w += font_size * 0.55
@@ -260,13 +283,7 @@ def _wrap_char_colors(char_colors: list, max_width: float, font_size: float) -> 
             current_line = []
             current_width = 0.0
             continue
-        cp = ord(ch)
-        if (
-            0x3000 <= cp <= 0x9FFF
-            or 0xAC00 <= cp <= 0xD7AF
-            or 0xF900 <= cp <= 0xFAFF
-            or 0x20000 <= cp <= 0x2FA1F
-        ):
+        if _is_fullwidth(ord(ch)):
             ch_w = font_size
         else:
             ch_w = font_size * 0.55
@@ -900,12 +917,8 @@ def render_page(
         ibbox = insert_bboxes[i]
         if rs <= 0 or ibbox.width < 2 or ibbox.height < 2:
             continue
-        # Estimate if text overflows: use em-width estimation
-        em_w = estimate_em_width(translated_texts[i])
-        chars_per_line = ibbox.width / rs if rs > 0 else 999
-        if chars_per_line <= 0:
-            continue
-        lines_needed = math.ceil(em_w / chars_per_line)
+        # Estimate if text overflows: use em-width estimation (newline-aware)
+        lines_needed = _estimate_lines_needed(translated_texts[i], rs, ibbox.width)
         height_needed = lines_needed * rs * _LINE_HEIGHT_FACTOR
         if height_needed > ibbox.height * 1.1:  # >10% overflow
             expanded = visual.overflow_bbox(
@@ -920,9 +933,8 @@ def render_page(
 
             # Check if expansion was sufficient — re-estimate overflow
             exp_bbox = insert_bboxes[i]
-            exp_cpl = exp_bbox.width / rs if rs > 0 else 999
-            if exp_cpl > 0:
-                exp_lines = math.ceil(em_w / exp_cpl)
+            if rs > 0 and exp_bbox.width > 0:
+                exp_lines = _estimate_lines_needed(translated_texts[i], rs, exp_bbox.width)
                 exp_height = exp_lines * rs * _LINE_HEIGHT_FACTOR
                 if exp_height > exp_bbox.height * 1.05:
                     # Bbox expansion insufficient — shrink font to fit

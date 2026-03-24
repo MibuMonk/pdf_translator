@@ -36,6 +36,32 @@
 - 修复：Step 10b 在渲染前检测溢出（em-width 估算），用 `overflow_bbox` 向下扩展 insert_bbox
 - 注意：扩展受 page_rect 限制，不会超出页面边界
 
+### Newline-unaware em-width estimation causing truncation
+- **Root cause**: `estimate_em_width()` treated `\n` as a 0.55-em character instead of
+  a forced line break.  `_find_fitting_size()` (CJK path) and Step 10b overflow check
+  both used this estimate, so they under-counted visual lines for multi-line text.
+- Example: text "line1\nlong_line2" at width W — the old code counted total em width
+  as one stream and divided by chars_per_line, missing that `\n` forces a new line
+  even when the first line has unused space.
+- **Fix**: added `_estimate_lines_needed()` that splits text on `\n`, estimates wrapped
+  lines per segment, then sums.  Used in both `_find_fitting_size` CJK path and Step 10b.
+
+### Fullwidth punctuation under-counted in em-width estimation
+- `estimate_em_width()` only counted CJK ideographs (U+3000-9FFF etc.) as 1.0 em.
+  Fullwidth punctuation like `：` (U+FF1A), `（` (U+FF08), `）` (U+FF09) are in
+  U+FF01-FF60 range and were counted as 0.55 em, but CJK fonts render them at full width.
+- This caused width underestimation → fewer lines predicted → insufficient bbox expansion.
+- **Fix**: added `_is_fullwidth()` helper covering U+FF01-FF60 and U+FFE0-FFE6 ranges.
+  Used consistently in `estimate_em_width`, `_estimate_text_width`, `_wrap_char_colors`.
+
+### overflow_bbox tight fit causing glyph clipping
+- `overflow_bbox` binary-searches for the minimum bbox height where `insert_textbox`
+  returns rc >= 0.  But rc >= 0 means "last baseline fits", not "all glyph pixels fit".
+  When the last line has minimal remaining space (rc ≈ 0.05px), the character descenders
+  or glyph edges may be visually clipped.
+- **Fix**: added `target_size * 0.3` safety margin to the final expanded height in
+  `visual_agent.overflow_bbox`, accounting for descender height.
+
 ### Text color contrast on dark backgrounds
 - topology_agent detects container rects AND their fill colors per block
 - Container colors flow through two paths:

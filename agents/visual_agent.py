@@ -110,7 +110,10 @@ class VisualOptimizer:
             except Exception:
                 hi_h = mid_h
 
-        final_y1 = min(bbox.y0 + hi_h, max_y1)
+        # Add a small descender/safety margin so the last line's glyphs are
+        # not clipped.  insert_textbox rc>=0 means "baseline fits" but the
+        # actual glyph descenders need extra room (≈30% of font size).
+        final_y1 = min(bbox.y0 + hi_h + target_size * 0.3, max_y1)
         vert_bbox = fitz.Rect(bbox.x0, bbox.y0, bbox.x1, final_y1)
 
         # Check if vertical-only expansion is sufficient
