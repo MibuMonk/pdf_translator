@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "testcase": "成果物4",
-  "run_date": "2026-03-23",
+  "run_date": "2026-03-25",
   "results": [
     {
       "issue_id": "ISS-001",
@@ -60,9 +60,9 @@
     }
   ],
   "summary": {
-    "total": 9,
-    "passed": 3,
-    "failed": 2,
+    "total": 11,
+    "passed": 4,
+    "failed": 3,
     "skipped": 4
   },
   "issue_results": {
@@ -140,49 +140,97 @@
     "style_check": {
       "check_result": "fail",
       "details": {
-        "style_issues": [
+        "error": "Failed to parse LLM response: Expecting value: line 1 column 1 (char 0)",
+        "raw": "Working tree is now clean. Two commits made:\n- `abd5272` — refactor: extract shared_utils, remove review_agent, enhance test_agent\n- `18f3610` — test: add regression baselines for 成果物1 and 成果物3"
+      }
+    },
+    "translation_completeness_check": {
+      "check_result": "fail",
+      "details": {
+        "issues": [
+          {
+            "page": 1,
+            "type": "low_translation_ratio",
+            "severity": "error",
+            "ratio": 0.0,
+            "total_chars": 10,
+            "translated_chars": 0
+          }
+        ],
+        "page_ratios": [
+          {
+            "page": 1,
+            "ratio": 0.0
+          },
+          {
+            "page": 2,
+            "ratio": 0.893
+          },
           {
             "page": 3,
-            "type": "terminology",
-            "severity": "error",
-            "description": "「效率」的表述不一致：P3 要点中用「行驶效率」，P3 标签中简称「效率」，P4 要点中又变为「出行效率」，三者指代同一概念却用词不同",
-            "examples": [
-              "P3: 安全性、舒适性、行驶效率等",
-              "P3 标签: 安全性、舒适性、效率等",
-              "P4: 安全性、舒适性、出行效率"
-            ]
+            "ratio": 0.999
           },
           {
             "page": 4,
-            "type": "terminology",
-            "severity": "warning",
-            "description": "「强化学习」与英文缩写「RL」混用：P3 标题使用全称「强化学习大模型」，P4 正文使用缩写「RL 大模型」，同一概念表述不统一",
-            "examples": [
-              "P3: 强化学习大模型：超越人类水平的 AI 驾驶员",
-              "P4: R6 是中国首个量产 RL 大模型"
-            ]
-          },
-          {
-            "page": 3,
-            "type": "terminology",
-            "severity": "warning",
-            "description": "驾驶员称谓不统一：P3 要点用「经验丰富的人类驾驶员」，P3 标签简称「经验驾驶员」",
-            "examples": [
-              "P3 要点: 以经验丰富的人类驾驶员轨迹作为监督数据",
-              "P3 标签: 经验驾驶员轨迹"
-            ]
+            "ratio": 0.971
           },
           {
             "page": 5,
-            "type": "tone",
-            "severity": "warning",
-            "description": "P5–P7 保留英文「Bad」「Good」标签的同时又附带中文「不良行为」「良好行为」，中英混排风格与其余纯中文页面不一致",
-            "examples": [
-              "Bad / 不良行为",
-              "Good / 良好行为"
-            ]
+            "ratio": 0.907
+          },
+          {
+            "page": 6,
+            "ratio": 0.921
+          },
+          {
+            "page": 7,
+            "ratio": 0.903
+          },
+          {
+            "page": 8,
+            "ratio": 1.0
           }
-        ]
+        ],
+        "untranslated_count": 0,
+        "low_ratio_pages": 1
+      }
+    },
+    "readability_check": {
+      "check_result": "pass",
+      "details": {
+        "issues": [
+          {
+            "page": 5,
+            "block_id": "p05_b001",
+            "type": "text_too_small",
+            "severity": "warning",
+            "rendered_size": 7.42
+          },
+          {
+            "page": 5,
+            "block_id": "p05_b002",
+            "type": "text_too_small",
+            "severity": "warning",
+            "rendered_size": 7.42
+          },
+          {
+            "page": 7,
+            "block_id": "p07_b001",
+            "type": "text_too_small",
+            "severity": "warning",
+            "rendered_size": 7.42
+          },
+          {
+            "page": 7,
+            "block_id": "p07_b002",
+            "type": "text_too_small",
+            "severity": "warning",
+            "rendered_size": 7.42
+          }
+        ],
+        "text_too_small_count": 4,
+        "content_truncated_count": 0,
+        "inconsistent_sizing_count": 0
       }
     },
     "regression_check": {
@@ -193,5 +241,23 @@
         "findings": []
       }
     }
+  },
+  "page_confidence": {
+    "pages": {
+      "1": 0.7,
+      "2": 1.0,
+      "3": 1.0,
+      "4": 1.0,
+      "5": 0.8,
+      "6": 1.0,
+      "7": 0.8,
+      "8": 1.0
+    },
+    "summary": {
+      "high": 7,
+      "medium": 1,
+      "low": 0
+    },
+    "review_needed": []
   }
 }
