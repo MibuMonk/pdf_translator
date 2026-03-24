@@ -348,11 +348,24 @@ def insert_text_multicolor(
     if not segments:
         return
 
-    # Flatten into per-character colors
-    char_colors = []
+    # Flatten into per-character colors, reconciling with `text` which
+    # contains authoritative \n positions that color_spans omit.
+    seg_chars = []  # flat list of (ch, color) from segments (no \n)
     for seg_text, color in segments:
         for ch in seg_text:
-            char_colors.append((ch, color))
+            seg_chars.append((ch, color))
+
+    char_colors = []
+    si = 0  # index into seg_chars
+    for ch in text:
+        if ch == '\n':
+            last_color = seg_chars[si - 1][1] if si > 0 else segments[0][1]
+            char_colors.append(('\n', last_color))
+        else:
+            if si < len(seg_chars):
+                char_colors.append(seg_chars[si])
+                si += 1
+            # else: text has more chars than segments — skip gracefully
 
     # --- Determine font size that fits all text in bbox ---
     # Use the full concatenated text for fitting (same logic as insert_text_fitting)
