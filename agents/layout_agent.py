@@ -350,10 +350,11 @@ def insert_text_multicolor(
 
     # Flatten into per-character colors, reconciling with `text` which
     # contains authoritative \n positions that color_spans omit.
-    seg_chars = []  # flat list of (ch, color) from segments (no \n)
+    seg_chars = []  # flat list of (ch, color) from segments (skip \n)
     for seg_text, color in segments:
         for ch in seg_text:
-            seg_chars.append((ch, color))
+            if ch != '\n':
+                seg_chars.append((ch, color))
 
     char_colors = []
     si = 0  # index into seg_chars
