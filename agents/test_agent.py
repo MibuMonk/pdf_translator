@@ -356,6 +356,7 @@ def translation_completeness_check(translated_json_path: str) -> dict:
                     and not _is_trivially_invariant(text)
                     and not _is_acronym_definition(text)
                     and not _is_likely_product_name(text)
+                    and not _is_pure_ascii(text)
                 ):
                     issues.append({
                         "page": page_num,
@@ -526,12 +527,7 @@ _HEADING_KEEP_WORDS = frozenset({
     "intel", "qualcomm", "huawei", "baidu", "alibaba",
 })
 
-# CJK character detection
-_CJK_RE = re.compile(r'[\u3000-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]')
-
-
-def _has_cjk(text: str) -> bool:
-    return bool(_CJK_RE.search(text))
+from shared_utils import has_cjk  # noqa: E402
 
 
 def mixed_language_check(translated_json_path: str) -> dict:
@@ -576,7 +572,7 @@ def mixed_language_check(translated_json_path: str) -> dict:
                 matched = m.group()
                 # Exception: skip if original is English AND translation has no CJK
                 # (entire block intentionally kept as-is, e.g. brand names)
-                if not _has_cjk(translated) and ' ' in text:
+                if not has_cjk(translated) and ' ' in text:
                     continue
                 # Exception: skip ALL-CAPS abbreviations/product names after bullet
                 # e.g. "• MBOX", "• VVP", "• FDR"
@@ -591,7 +587,7 @@ def mixed_language_check(translated_json_path: str) -> dict:
                 end_pos = m.end()
                 if end_pos < len(translated):
                     rest = translated[end_pos:end_pos + 20].lstrip()
-                    if rest and (rest[0] in '：:' or _has_cjk(rest[:1])):
+                    if rest and (rest[0] in '：:' or has_cjk(rest[:1])):
                         continue
                     # If followed by another English word, it's a multi-word term, not untranslated heading
                     if rest and re.match(r'[A-Za-z]', rest):
@@ -606,7 +602,7 @@ def mixed_language_check(translated_json_path: str) -> dict:
                 })
 
             # Rule 2: english_phrase_in_translation — 3+ consecutive English words in CJK text
-            if not _has_cjk(translated):
+            if not has_cjk(translated):
                 continue  # Not a CJK translation, skip phrase check
 
             # Remove parenthesised content before scanning
@@ -779,7 +775,7 @@ def terminology_consistency_check(translated_json_path: str) -> dict:
             translated = block.get("translated") or ""
             block_id = block.get("block_id", block.get("id", f"p{page_num:02d}_b{idx:03d}"))
 
-            if not text or not translated or not _has_cjk(translated):
+            if not text or not translated or not has_cjk(translated):
                 continue
 
             # Extract English terms from original text
@@ -1001,6 +997,9 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
 
 _TRIVIAL_RE = re.compile(r'^[\d\s.,;:!?()[\]/%+\-=\\\'\"]*$')
 _ACRONYM_DEF_RE = re.compile(r'^[A-Z]{2,}[0-9A-Z]*[\s\n]*[\(:]')
+# Matches strings that contain ONLY ASCII-range characters (letters, digits,
+# punctuation, spaces).  No CJK, kana, hangul, or other non-ASCII scripts.
+_PURE_ASCII_RE = re.compile(r'^[\x20-\x7E\t\n\r]*$')
 
 
 def _is_trivially_invariant(text: str) -> bool:
@@ -1011,6 +1010,19 @@ def _is_trivially_invariant(text: str) -> bool:
 def _is_acronym_definition(text: str) -> bool:
     """True if text looks like an acronym definition line (DDOD: Data-Driven …)."""
     return bool(_ACRONYM_DEF_RE.match(text.strip()))
+
+
+def _is_pure_ascii(text: str) -> bool:
+    """True if text contains only ASCII printable chars, tabs, newlines.
+
+    Pure-ASCII blocks (product names like 'HONDA', abbreviations like 'API',
+    technical terms like 'Wi-Fi') are legitimately kept unchanged during
+    translation.  Flagging them as 'unchanged_translation' is a false positive.
+
+    Returns False if the text contains ANY CJK, kana, hangul, or other
+    non-ASCII characters — those blocks should still be checked.
+    """
+    return bool(_PURE_ASCII_RE.match(text))
 
 
 def _weighted_len(text: str) -> float:
@@ -1057,6 +1069,7 @@ def _check_translation_block(page_num: int, block_id: str, block: dict) -> list[
         translated == text
         and not _is_trivially_invariant(text)
         and not _is_acronym_definition(text)
+        and not _is_pure_ascii(text)
         and len(text) > 5
     ):
         issues.append({
@@ -1339,6 +1352,180 @@ def style_check(translated_json_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Per-page confidence scoring
+# ---------------------------------------------------------------------------
+
+# Severity deductions for page confidence scoring
+_CONFIDENCE_DEDUCTIONS = {
+    "error":    0.3,
+    "critical": 0.3,  # coverage_check uses "critical" instead of "error"
+    "warning":  0.1,
+}
+
+# Confidence tier thresholds
+_CONFIDENCE_HIGH   = 0.8   # >= 0.8: auto-pass, no review needed
+_CONFIDENCE_MEDIUM = 0.5   # 0.5-0.8: summary review
+
+
+def _extract_page_findings(issue_results: dict) -> list[dict]:
+    """
+    Walk all check results and extract findings with page + severity info.
+    Returns a flat list of {"page": int, "severity": str} dicts.
+    """
+    findings = []
+
+    for check_name, check_data in issue_results.items():
+        if not isinstance(check_data, dict):
+            continue
+        details = check_data.get("details")
+        if details is None:
+            continue
+
+        # Each check stores findings in different structures.
+        # We extract (page, severity) from each.
+
+        if check_name == "coverage_check" and isinstance(details, dict):
+            for iss in details.get("translation_issues", []):
+                if "page" in iss and "severity" in iss:
+                    findings.append({"page": iss["page"], "severity": iss["severity"]})
+
+        elif check_name == "quality_check" and isinstance(details, list):
+            for iss in details:
+                if "page" in iss and "severity" in iss:
+                    findings.append({"page": iss["page"], "severity": iss["severity"]})
+
+        elif check_name in ("linebreak_consistency_check", "mixed_language_check"):
+            if isinstance(details, dict):
+                for iss in details.get("issues", []):
+                    if "page" in iss and "severity" in iss:
+                        findings.append({"page": iss["page"], "severity": iss["severity"]})
+
+        elif check_name == "translation_completeness_check" and isinstance(details, dict):
+            for iss in details.get("issues", []):
+                if "page" in iss and "severity" in iss:
+                    findings.append({"page": iss["page"], "severity": iss["severity"]})
+
+        elif check_name == "readability_check" and isinstance(details, dict):
+            for iss in details.get("issues", []):
+                sev = iss.get("severity")
+                if not sev:
+                    continue
+                if "page" in iss:
+                    findings.append({"page": iss["page"], "severity": sev})
+                # inconsistent_sizing uses page_a / page_b
+                if "page_a" in iss:
+                    findings.append({"page": iss["page_a"], "severity": sev})
+                if "page_b" in iss:
+                    findings.append({"page": iss["page_b"], "severity": sev})
+
+        elif check_name == "style_check" and isinstance(details, dict):
+            for iss in details.get("style_issues", []):
+                if "page" in iss and "severity" in iss:
+                    findings.append({"page": iss["page"], "severity": iss["severity"]})
+
+        elif check_name == "terminology_consistency_check" and isinstance(details, dict):
+            # variant_pair_issues: sample_locations_a/b contain page refs
+            for iss in details.get("variant_pair_issues", []):
+                sev = iss.get("severity", "warning")
+                for loc in iss.get("sample_locations_a", []):
+                    if "page" in loc:
+                        findings.append({"page": loc["page"], "severity": sev})
+                for loc in iss.get("sample_locations_b", []):
+                    if "page" in loc:
+                        findings.append({"page": loc["page"], "severity": sev})
+            # dynamic_issues: translations[].sample_locations contain page refs
+            for iss in details.get("dynamic_issues", []):
+                sev = iss.get("severity", "warning")
+                for trans in iss.get("translations", []):
+                    for loc in trans.get("sample_locations", []):
+                        if "page" in loc:
+                            findings.append({"page": loc["page"], "severity": sev})
+
+        elif check_name == "regression_check" and isinstance(details, dict):
+            for finding in details.get("findings", []):
+                sev = finding.get("severity")
+                if not sev:
+                    continue
+                # regression findings may have "page" or "pages"
+                if "page" in finding:
+                    findings.append({"page": finding["page"], "severity": sev})
+                for pg in finding.get("pages", []):
+                    findings.append({"page": pg, "severity": sev})
+
+    return findings
+
+
+def _compute_page_confidence(issue_results: dict, num_pages: int) -> dict:
+    """
+    Compute per-page confidence scores based on check findings.
+
+    Args:
+        issue_results: the issue_results dict from the test report
+        num_pages: total number of pages in the document
+
+    Returns:
+        {
+            "pages": {"1": 0.95, "2": 0.6, ...},
+            "summary": {"high": N, "medium": N, "low": N},
+            "review_needed": [list of LOW confidence page numbers]
+        }
+    """
+    # Initialize all pages at 1.0
+    scores = {pg: 1.0 for pg in range(1, num_pages + 1)}
+
+    # Deduct based on findings
+    findings = _extract_page_findings(issue_results)
+    for f in findings:
+        pg = f["page"]
+        if pg not in scores:
+            continue
+        deduction = _CONFIDENCE_DEDUCTIONS.get(f["severity"], 0.0)
+        scores[pg] -= deduction
+
+    # Clamp to [0.0, 1.0]
+    for pg in scores:
+        scores[pg] = round(max(0.0, min(1.0, scores[pg])), 2)
+
+    # Classify tiers
+    high = medium = low = 0
+    review_needed = []
+    for pg in sorted(scores):
+        s = scores[pg]
+        if s >= _CONFIDENCE_HIGH:
+            high += 1
+        elif s >= _CONFIDENCE_MEDIUM:
+            medium += 1
+        else:
+            low += 1
+            review_needed.append(pg)
+
+    return {
+        "pages": {str(pg): scores[pg] for pg in sorted(scores)},
+        "summary": {"high": high, "medium": medium, "low": low},
+        "review_needed": review_needed,
+    }
+
+
+def _get_num_pages(translated_json_path: str) -> int:
+    """Get total page count from translated.json."""
+    with open(translated_json_path, encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        pages = data
+    elif isinstance(data, dict):
+        pages = data.get("pages", [data])
+    else:
+        return 0
+    page_nums = set()
+    for p in pages:
+        if isinstance(p, dict):
+            pn = p.get("page", p.get("page_num", 0))
+            if pn > 0:
+                page_nums.add(pn)
+    return max(page_nums) if page_nums else 0
+
+
+# ---------------------------------------------------------------------------
 # Thumbnail rendering (from qa_agent)
 # ---------------------------------------------------------------------------
 
@@ -1505,6 +1692,22 @@ def run_checks(testcase: str, registry_path: Path, output_path: Path,
         "issue_results": issue_results,
     }
 
+    # Per-page confidence scoring
+    num_pages = _get_num_pages(str(translated_json_path))
+    if num_pages > 0:
+        page_conf = _compute_page_confidence(issue_results, num_pages)
+        report["page_confidence"] = page_conf
+        n_review = len(page_conf["review_needed"])
+        conf_summ = page_conf["summary"]
+        print(bold("\nPage confidence:"))
+        print(f"  HIGH ({_CONFIDENCE_HIGH}+): {conf_summ['high']}  "
+              f"MEDIUM ({_CONFIDENCE_MEDIUM}-{_CONFIDENCE_HIGH}): {conf_summ['medium']}  "
+              f"LOW (<{_CONFIDENCE_MEDIUM}): {conf_summ['low']}")
+        if n_review > 0:
+            print(yellow(f"  Review needed: pages {page_conf['review_needed']}"))
+        else:
+            print(green("  No pages require manual review."))
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -1599,6 +1802,22 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str, thumbs: st
             "readability_check": rd_result,
         },
     }
+
+    # Per-page confidence scoring
+    num_pages = _get_num_pages(translated_json)
+    if num_pages > 0:
+        page_conf = _compute_page_confidence(report["issue_results"], num_pages)
+        report["page_confidence"] = page_conf
+        n_review = len(page_conf["review_needed"])
+        conf_summ = page_conf["summary"]
+        print(bold("\nPage confidence:"))
+        print(f"  HIGH ({_CONFIDENCE_HIGH}+): {conf_summ['high']}  "
+              f"MEDIUM ({_CONFIDENCE_MEDIUM}-{_CONFIDENCE_HIGH}): {conf_summ['medium']}  "
+              f"LOW (<{_CONFIDENCE_MEDIUM}): {conf_summ['low']}")
+        if n_review > 0:
+            print(yellow(f"  Review needed: pages {page_conf['review_needed']}"))
+        else:
+            print(green("  No pages require manual review."))
 
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)

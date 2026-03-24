@@ -47,6 +47,9 @@ class TopologyResult:
     # Container: which drawing rect visually encloses block i (None if none)
     containers: List[Optional[fitz.Rect]]
 
+    # Container fill colors: RGB tuple (0-1 floats) for each block's container (None if none)
+    container_colors: List[Optional[Tuple[float, float, float]]]
+
     # Group id: blocks in the same visual group (e.g. inside the same colored box)
     # -1 = ungrouped
     group_ids: List[int]
@@ -124,8 +127,8 @@ class TopologyAnalyzer:
         """
         n = len(bboxes)
 
-        # Step 1 — container detection
-        containers = self._detect_containers(bboxes, drawings)
+        # Step 1 — container detection (rects + fill colors)
+        containers, container_colors = self._detect_containers(bboxes, drawings)
 
         # Step 2 — group assignment
         group_ids = self._assign_groups(containers)
@@ -147,6 +150,7 @@ class TopologyAnalyzer:
         return TopologyResult(
             cells=cells,
             containers=containers,
+            container_colors=container_colors,
             group_ids=group_ids,
             column_ids=column_ids,
             row_ids=row_ids,
@@ -161,13 +165,21 @@ class TopologyAnalyzer:
         self,
         bboxes: List[fitz.Rect],
         drawings: List[dict],
-    ) -> List[Optional[fitz.Rect]]:
-        """For each block, find the smallest filled drawing rect that contains it."""
+    ) -> Tuple[List[Optional[fitz.Rect]], List[Optional[Tuple[float, float, float]]]]:
+        """For each block, find the smallest filled drawing rect that contains it.
+
+        Returns
+        -------
+        (containers, container_colors)
+            containers[i] = the enclosing Rect, or None
+            container_colors[i] = the fill color (r,g,b) in [0,1], or None
+        """
 
         page_area = self.page_rect.width * self.page_rect.height
 
-        # Pre-filter candidate drawing rects
+        # Pre-filter candidate drawing rects, keeping fill color alongside rect
         candidate_rects: List[fitz.Rect] = []
+        candidate_fills: List[Tuple[float, float, float]] = []
         for d in drawings:
             fill = d.get("fill")
             if fill is None:
@@ -185,12 +197,15 @@ class TopologyAnalyzer:
             if rect_area >= 0.60 * page_area:
                 continue
             candidate_rects.append(r)
+            candidate_fills.append((float(fill[0]), float(fill[1]), float(fill[2])))
 
         containers: List[Optional[fitz.Rect]] = []
+        container_colors: List[Optional[Tuple[float, float, float]]] = []
         for b in bboxes:
             best: Optional[fitz.Rect] = None
+            best_color: Optional[Tuple[float, float, float]] = None
             best_area = float("inf")
-            for r in candidate_rects:
+            for ci, r in enumerate(candidate_rects):
                 if (
                     r.x0 <= b.x0 + 2
                     and r.y0 <= b.y0 + 2
@@ -201,9 +216,11 @@ class TopologyAnalyzer:
                     if area < best_area:
                         best_area = area
                         best = r
+                        best_color = candidate_fills[ci]
             containers.append(best)
+            container_colors.append(best_color)
 
-        return containers
+        return containers, container_colors
 
     # ------------------------------------------------------------------
     # Step 2: Group assignment

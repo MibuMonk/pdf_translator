@@ -26,6 +26,7 @@ import fitz  # PyMuPDF
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent))
 from topology_agent import TopologyAnalyzer  # noqa: E402
+from shared_utils import cluster              # noqa: E402
 
 # contracts/ is two directories up from this file
 _CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
@@ -55,31 +56,6 @@ def _parse_pages(spec: str) -> list[int]:
     return sorted(pages)
 
 
-# ---------------------------------------------------------------------------
-# Y-axis clustering helper (copied from layout_agent._cluster)
-# ---------------------------------------------------------------------------
-
-def _cluster(vals: list[float], tol: float = 3.0, min_count: int = 2) -> dict:
-    """Group floats that are within *tol* of each other.
-
-    Returns {representative_value: [original_values]} for groups with
-    at least *min_count* members.
-    """
-    if not vals:
-        return {}
-    sorted_vals = sorted(vals)
-    groups: list[list[float]] = [[sorted_vals[0]]]
-    for v in sorted_vals[1:]:
-        if v - groups[-1][-1] <= tol:
-            groups[-1].append(v)
-        else:
-            groups.append([v])
-    result: dict = {}
-    for grp in groups:
-        if len(grp) >= min_count:
-            rep = sum(grp) / len(grp)
-            result[rep] = grp
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -123,12 +99,13 @@ def _plan_page(
     topo = TopologyAnalyzer(page_rect)
     topo_result = topo.analyze(bboxes, alignments, drawings, image_obstacles)
     insert_bboxes = topo_result.insert_bboxes
+    container_colors = topo_result.container_colors
 
     # ------------------------------------------------------------------
     # snap_map — Y-axis clustering alignment
     # ------------------------------------------------------------------
     y0_vals = [b.y0 for b in bboxes]
-    clusters = _cluster(y0_vals, tol=3.0, min_count=2)
+    clusters = cluster(y0_vals, tol=3.0, min_count=2)
     # Build snap_map: original_y0 (as string key) → snapped_y0 (float)
     snap_map: dict[str, float] = {}
     for rep, members in clusters.items():
@@ -154,12 +131,16 @@ def _plan_page(
     cells: list[dict] = []
     title_set = set(title_indices)
     for idx, (block, ibbox) in enumerate(zip(blocks, insert_bboxes)):
-        cells.append({
+        cell: dict = {
             "block_id":    block["id"],
             "insert_bbox": [ibbox.x0, ibbox.y0, ibbox.x1, ibbox.y1],
             "is_title":    idx in title_set,
             "is_dense":    is_dense,
-        })
+        }
+        cc = container_colors[idx] if idx < len(container_colors) else None
+        if cc is not None:
+            cell["container_color"] = list(cc)
+        cells.append(cell)
 
     return {
         "page_num":      page_data["page_num"],

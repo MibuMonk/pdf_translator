@@ -28,6 +28,10 @@ Y_GAP_MAX    = 18.0   # max vertical gap between mergeable blocks (px)
 FS_RATIO_MAX = 2.0    # max font-size ratio between merged blocks (skip big jumps)
 MIN_ISOLATED_FS = 9.0 # blocks below this size AND isolated are diagram labels → skip
 HARD_ENDINGS = set(".!?。！？…")
+BULLET_MARKERS = set("•\u2022-*\u30fb\u25a0\u25a1\u25ba\u25b6\u25cf\u25cb\u2013\u2014\uff65")
+# Minimum char count for a bullet-continuation exception to apply.
+# Blocks shorter than this with hard endings are likely headings — keep them separate.
+BULLET_CONT_MIN_CHARS = 4
 
 # Threshold for "missed fragment candidate": x_diff beyond column tolerance but y_gap tiny
 MISSED_FRAG_Y_GAP_MAX  = 5.0   # px — very small gap signals a fragment
@@ -57,6 +61,48 @@ def _ends_hard(text: str) -> bool:
     """True if text ends with sentence-final punctuation (don't merge across it)."""
     stripped = text.rstrip()
     return bool(stripped) and stripped[-1] in HARD_ENDINGS
+
+
+def _starts_with_bullet(text: str) -> bool:
+    """True if text begins with a common bullet marker (after stripping whitespace)."""
+    stripped = text.lstrip()
+    return bool(stripped) and stripped[0] in BULLET_MARKERS
+
+
+def _should_block_merge_on_ending(prev_text: str, next_text: str) -> bool:
+    """
+    Decide whether the hard-ending of *prev_text* should block merging with *next_text*.
+
+    Returns True  → the hard ending DOES block the merge  (don't merge).
+    Returns False → the hard ending should be IGNORED      (allow merge).
+
+    Logic:
+      - If prev doesn't end hard → False (no block).
+      - If next starts with a bullet marker → True (new bullet item, keep separate).
+      - If prev starts with a bullet marker AND next does NOT → the next block is
+        a continuation of the bullet's text that was split by the parser.
+        Allow merge UNLESS prev is very short (heading-like, e.g. "概要。").
+      - Otherwise (neither block is a bullet) → True (normal paragraph boundary).
+    """
+    if not _ends_hard(prev_text):
+        return False  # no hard ending, nothing to block
+
+    # Next block starts a new bullet → always block merge
+    if _starts_with_bullet(next_text):
+        return True
+
+    # Prev is a bullet item whose text was split by the parser
+    if _starts_with_bullet(prev_text):
+        # Guard against very short "heading-like" bullets (e.g. "• 概要。")
+        # Strip the bullet marker + whitespace, then check remaining length
+        inner = prev_text.lstrip()
+        if inner:
+            inner = inner[1:].lstrip()  # drop bullet char, then whitespace
+        if len(inner.rstrip()) >= BULLET_CONT_MIN_CHARS:
+            return False  # allow merge — this is a split bullet continuation
+
+    # Default: hard ending blocks merge (normal paragraph boundary / heading)
+    return True
 
 
 def _has_horizontal_neighbor(block: dict, all_blocks: list,
@@ -193,7 +239,7 @@ def _merge_column(blocks: list, all_page_blocks: list,
         block_has_horiz = _has_horizontal_neighbor(block, all_page_blocks)
         fs_ok = _fs_compatible(prev, block)
         color_ok = _color_compatible(prev, block)
-        ends_hard = _ends_hard(prev["text"])
+        ends_hard = _should_block_merge_on_ending(prev["text"], block["text"])
 
         can_merge = (
             gap >= 0                          # no overlap

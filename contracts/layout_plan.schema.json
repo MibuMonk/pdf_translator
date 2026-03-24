@@ -27,7 +27,13 @@
                   "minItems": 4, "maxItems": 4
                 },
                 "is_title":  { "type": "boolean" },
-                "is_dense":  { "type": "boolean", "description": "True if page is above-average block density." }
+                "is_dense":  { "type": "boolean", "description": "True if page is above-average block density." },
+                "container_color": {
+                  "type": "array",
+                  "description": "Fill color [r,g,b] (0-1 floats) of the enclosing background container, if any. Used for text contrast adjustment.",
+                  "items": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "minItems": 3, "maxItems": 3
+                }
               }
             }
           },

@@ -59,6 +59,7 @@ Consolidator must produce semantically complete blocks before translation. layou
 - `agents/` directory contains all pipeline agents
 - Font auto-switcher: validates CJK coverage with a probe string; excludes LastResort.otf and placeholder fonts
 - test_agent has two modes: pipeline QA mode (--json/--pdf flags) and testcase regression mode (--testcase flag)
+- `agents/shared_utils.py` contains shared helpers (`has_cjk`, `cluster`) imported by layout_agent, visual_agent, test_agent, and space_planner
 
 ## Agent 架构设计
 
@@ -68,7 +69,6 @@ Consolidator must produce semantically complete blocks before translation. layou
 
 | Agent | 触发条件 | 职责 |
 |-------|---------|------|
-| review_agent | coordinator 需要人类视角审查 | 用 LLM 视觉审查 output.pdf，从目标读者角度评估可读性和专业性 |
 | retry_agent | test_agent 标记翻译质量不合格的块 | 对指定 block 重新翻译，局部重渲染 |
 | term_agent | 文档属于高度专业化技术领域 | 预提取领域术语和缩写，生成词表注入 translate_agent prompt |
 | batch_agent | 文档超过 50 页 | 将 translate 步骤拆分并行分段处理 |
@@ -81,7 +81,7 @@ Consolidator must produce semantically complete blocks before translation. layou
 
 ## TODO
 
-- [ ] consolidator: `_ends_hard` too conservative for bullet points (stops merging on period) — needs tuning
+- [x] consolidator: `_ends_hard` too conservative for bullet points — fixed with `_should_block_merge_on_ending()` context-aware check
 - [ ] agent registry: mechanism for activating optional agents is designed but not implemented
 - [ ] QA → re-translate loop: automatic re-translation of blocks flagged by test_agent coverage_check
 

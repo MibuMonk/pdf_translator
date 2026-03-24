@@ -9,16 +9,9 @@ from typing import List, Optional
 
 import fitz  # PyMuPDF
 
+from shared_utils import has_cjk  # noqa: E402
+
 LINE_HEIGHT = 1.2
-
-
-def has_cjk(text: str) -> bool:
-    """Return True if text contains any CJK or kana character."""
-    for ch in text:
-        cp = ord(ch)
-        if 0x4E00 <= cp <= 0x9FFF or 0x3040 <= cp <= 0x30FF:
-            return True
-    return False
 
 
 class VisualOptimizer:

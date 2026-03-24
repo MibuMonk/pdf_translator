@@ -22,6 +22,7 @@ import fitz  # PyMuPDF
 sys.path.insert(0, str(Path(__file__).parent))
 from visual_agent import VisualOptimizer       # noqa: E402
 from topology_agent import TopologyAnalyzer    # noqa: E402
+from shared_utils import has_cjk, cluster      # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -37,18 +38,6 @@ _X_OVERLAP_RATIO = 0.30  # 30% x-overlap for adjacent merge
 # Unicode / text helpers
 # ---------------------------------------------------------------------------
 
-def _has_cjk(text: str) -> bool:
-    """Return True if *text* contains CJK or kana characters."""
-    for ch in text:
-        cp = ord(ch)
-        if (
-            0x3000 <= cp <= 0x9FFF   # CJK unified + hiragana/katakana
-            or 0xAC00 <= cp <= 0xD7AF  # Hangul syllables
-            or 0xF900 <= cp <= 0xFAFF  # CJK compatibility
-            or 0x20000 <= cp <= 0x2FA1F  # CJK extensions B-F
-        ):
-            return True
-    return False
 
 
 def estimate_em_width(text: str) -> float:
@@ -67,22 +56,6 @@ def estimate_em_width(text: str) -> float:
             total += 0.55
     return total
 
-
-def _truncate_to_em_width(text: str, max_em: float) -> str:
-    """Truncate *text* so that its em-width does not exceed *max_em*, appending '…'."""
-    total = 0.0
-    for i, ch in enumerate(text):
-        cp = ord(ch)
-        w = 1.0 if (
-            0x3000 <= cp <= 0x9FFF
-            or 0xAC00 <= cp <= 0xD7AF
-            or 0xF900 <= cp <= 0xFAFF
-            or 0x20000 <= cp <= 0x2FA1F
-        ) else 0.55
-        if total + w > max_em:
-            return text[:i] + "…"
-        total += w
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +170,7 @@ def _find_fitting_size(
 
     fn = fontname or "helv"
 
-    if _has_cjk(text):
+    if has_cjk(text):
         # insert_textbox with "helv" cannot measure CJK — use em-width estimation instead
         em_w = estimate_em_width(text)
         lo, hi = min_size, base_size
@@ -535,31 +508,6 @@ def insert_text_fitting(
         print(f"[WARN] insert_textbox failed: {exc}", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# Clustering helper
-# ---------------------------------------------------------------------------
-
-def _cluster(vals: list, tol: float = 3.0, min_count: int = 2) -> dict:
-    """Group floats that are within *tol* of each other.
-
-    Returns {representative_value: [original_values]} for groups with
-    at least *min_count* members.
-    """
-    if not vals:
-        return {}
-    sorted_vals = sorted(vals)
-    groups: list[list[float]] = [[sorted_vals[0]]]
-    for v in sorted_vals[1:]:
-        if v - groups[-1][-1] <= tol:
-            groups[-1].append(v)
-        else:
-            groups.append([v])
-    result = {}
-    for grp in groups:
-        if len(grp) >= min_count:
-            rep = sum(grp) / len(grp)
-            result[rep] = grp
-    return result
 
 
 
@@ -747,7 +695,7 @@ def render_page(
         snap_map: dict[float, float] = {float(k): float(v) for k, v in raw_snap.items()}
     else:
         y0_vals = [b.y0 for b in bboxes]
-        clusters = _cluster(y0_vals, tol=3.0, min_count=2)
+        clusters = cluster(y0_vals, tol=3.0, min_count=2)
         snap_map = {}
         for rep, members in clusters.items():
             for v in members:
@@ -777,6 +725,11 @@ def render_page(
     if plan_page is not None:
         plan_cells = plan_page.get("cells", [])
         insert_bboxes = [fitz.Rect(c["insert_bbox"]) for c in plan_cells]
+        # Extract container colors from plan (optional field, may be absent)
+        container_colors = [
+            tuple(c["container_color"]) if "container_color" in c else None
+            for c in plan_cells
+        ]
         # Align count: if plan and block lists diverge (shouldn't happen), fall back
         if len(insert_bboxes) != len(bboxes):
             print(
@@ -792,6 +745,7 @@ def render_page(
             bboxes, aligns, drawings, image_obstacles
         )
         insert_bboxes = topo_result.insert_bboxes
+        container_colors = topo_result.container_colors
 
     # ------------------------------------------------------------------
     # REQ-2: Table cell detection — cap insert_bbox to original block bbox
@@ -992,7 +946,8 @@ def render_page(
         if not text.strip() and idx < len(blocks):
             text = blocks[idx].get("text", text)
         src_color = source_colors[idx] if idx < len(source_colors) else (0.0, 0.0, 0.0)
-        color = visual.adjust_color(src_color)
+        bg_color = container_colors[idx] if idx < len(container_colors) else None
+        color = visual.adjust_color(src_color, bg_color)
 
         block = blocks[idx] if idx < len(blocks) else {}
 
@@ -1002,7 +957,7 @@ def render_page(
             # Adjust each span color through visual.adjust_color
             adjusted_cs = [
                 {"text": s["text"],
-                 "color": list(visual.adjust_color(tuple(float(c) for c in s["color"])))}
+                 "color": list(visual.adjust_color(tuple(float(c) for c in s["color"]), bg_color))}
                 for s in translated_spans
             ]
             insert_text_multicolor(
@@ -1022,7 +977,7 @@ def render_page(
                 # Adjust each span color through visual.adjust_color
                 adjusted_cs = [
                     {"text": s["text"],
-                     "color": list(visual.adjust_color(tuple(float(c) for c in s["color"])))}
+                     "color": list(visual.adjust_color(tuple(float(c) for c in s["color"]), bg_color))}
                     for s in cs
                 ]
                 insert_text_multicolor(

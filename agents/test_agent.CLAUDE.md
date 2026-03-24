@@ -21,6 +21,32 @@ QA 检查，输出 test_report.json。
      - bbox 面积 >= 2000px²：ratio > 3.0 → error，2.0–3.0 → warning
    - `inconsistent_sizing`：两页 block[0] 文本相似度 > 80% 但 font_size 差异 > 30%，severity=warning
 6. **regression_check**：与 baseline 对比的回归检测
+7. **page_confidence** (post-processing)：per-page confidence scoring based on all check findings
+
+## Per-page Confidence Scoring
+
+After all checks complete, `_compute_page_confidence()` aggregates page-specific findings from every check and computes a confidence score per page.
+
+**Deduction rules:**
+- `error` or `critical` severity finding on a page: -0.3
+- `warning` severity finding on a page: -0.1
+- Scores clamped to [0.0, 1.0]
+
+**Confidence tiers:**
+- HIGH (>= 0.8): auto-pass, no review needed
+- MEDIUM (0.5-0.8): summary review recommended
+- LOW (< 0.5): full review needed
+
+**Output** (added as `page_confidence` top-level field in test_report.json):
+```json
+{
+  "pages": {"1": 0.95, "2": 0.6, "3": 0.3},
+  "summary": {"high": 40, "medium": 3, "low": 2},
+  "review_needed": [3]
+}
+```
+
+`_extract_page_findings()` knows the finding structure of each check (coverage_check, quality_check, linebreak_consistency_check, mixed_language_check, translation_completeness_check, readability_check, style_check, terminology_consistency_check, regression_check) and extracts (page, severity) pairs from each.
 
 ## 回归测试
 
@@ -54,8 +80,11 @@ python test_agent.py --testcase 成果物4 --save-baseline
 
 ## 已知问题
 
-- `unchanged_translation` 误报率高：纯 ASCII 产品名/缩写保持原文是正确行为，但被标记为 warning
-- quality_check 被 warning 级别的误报拖垮，需要对纯 ASCII 文本加白名单或跳过
+(none currently tracked)
+
+## Lessons Learned
+
+- **Pure-ASCII skip rule**: `_is_pure_ascii()` guards both `unchanged_translation` (coverage_check) and `untranslated_content` (translation_completeness_check). Regex `^[\x20-\x7E\t\n\r]*$` covers printable ASCII plus whitespace. If ANY non-ASCII character is present (CJK, kana, hangul, accented Latin, etc.), the block is still flagged. This eliminates false positives from product names ("HONDA"), abbreviations ("API"), and technical terms ("Wi-Fi") while preserving detection of genuinely untranslated CJK content.
 
 ## 运行模式
 

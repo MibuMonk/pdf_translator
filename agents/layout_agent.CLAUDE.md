@@ -36,6 +36,16 @@
 - 修复：Step 10b 在渲染前检测溢出（em-width 估算），用 `overflow_bbox` 向下扩展 insert_bbox
 - 注意：扩展受 page_rect 限制，不会超出页面边界
 
+### Text color contrast on dark backgrounds
+- topology_agent detects container rects AND their fill colors per block
+- Container colors flow through two paths:
+  1. **Precomputed**: space_planner writes `container_color` (optional) into layout_plan.json cells
+  2. **Live fallback**: topology_agent.analyze() returns `container_colors` in TopologyResult
+- In Step 11, `visual.adjust_color(src_color, bg_color)` uses the container fill color
+  to flip dark-on-dark text to white, or white-on-light text to black
+- Color format: RGB float tuples (0-1), same space as PyMuPDF `page.get_drawings()` fill values
+- All three adjust_color call sites updated: single-color, translated_spans, and color_spans paths
+
 ## I/O
 
 - 输入：源 PDF + translated.json + layout_plan.json
