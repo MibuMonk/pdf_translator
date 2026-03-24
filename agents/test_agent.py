@@ -527,6 +527,7 @@ _HEADING_KEEP_WORDS = frozenset({
     "intel", "qualcomm", "huawei", "baidu", "alibaba",
 })
 
+sys.path.insert(0, str(Path(__file__).parent))
 from shared_utils import has_cjk  # noqa: E402
 
 
@@ -1315,11 +1316,13 @@ def style_check(translated_json_path: str) -> dict:
 
     try:
         claude_cli = _find_claude_cli()
+        # Run from /tmp to avoid project-level hooks/CLAUDE.md polluting stdout
         result = subprocess.run(
             [claude_cli, "-p", prompt],
             capture_output=True,
             text=True,
             timeout=180,
+            cwd="/tmp",
         )
         raw = result.stdout.strip()
         # Strip markdown fences if present
