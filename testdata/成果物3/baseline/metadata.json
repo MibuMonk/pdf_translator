@@ -1,0 +1,8 @@
+{
+  "testcase": "成果物3",
+  "created_at": "2026-03-25T00:47:27.022650",
+  "output_pdf": "/Users/qirui/pdf_translator/testdata/成果物3/output.pdf",
+  "parsed_json": "/Users/qirui/pdf_translator/testdata/成果物3/work/parsed.json",
+  "translated_json": "/Users/qirui/pdf_translator/testdata/成果物3/work/translated.json",
+  "num_pages": 88
+}
