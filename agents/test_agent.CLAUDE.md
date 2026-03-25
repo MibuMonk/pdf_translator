@@ -102,6 +102,11 @@ python test_agent.py --testcase 成果物4 --save-baseline
 - 后果：output PDF 中水印与文字的重叠仍被误报为 error（100 个左右）
 - 当前无自动解决方案；xref 损坏是 source PDF 的固有问题
 
+### visual_review_check 显式 review_pages 被 cap 截断（已修复）
+- `_VISUAL_REVIEW_MAX_PAGES = 10` 的 cap 对所有调用生效，包括显式传入 review_pages 的情况
+- 后果：`review_pages=list(range(36,89))` 实际只审了前 10 页（P36-45）
+- 修复：引入 `explicit_pages` 标记，只有 review_pages=None 的自动模式才触发 cap；显式传入则不 cap
+
 ### preprocess() \n 折行位置无测试覆盖
 - layout_agent 的 preprocess() 修复了 `\s+` 吃掉显式 `\n` 的 bug
 - test_agent 无专项检测：word_split 检测的是英文单词断行，不检测折行"位置是否合理"

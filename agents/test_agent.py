@@ -1803,6 +1803,7 @@ def visual_review_check(source_pdf: str, output_pdf: str,
     src_doc.close()
     out_doc.close()
 
+    explicit_pages = review_pages is not None
     if review_pages is None:
         review_pages = list(range(1, min(src_page_count, out_page_count) + 1))
 
@@ -1812,8 +1813,8 @@ def visual_review_check(source_pdf: str, output_pdf: str,
         if 1 <= p <= src_page_count and 1 <= p <= out_page_count
     ]
 
-    # Cap at max pages
-    if len(review_pages) > _VISUAL_REVIEW_MAX_PAGES:
+    # Cap at max pages only when pages were auto-detected (not explicitly provided)
+    if not explicit_pages and len(review_pages) > _VISUAL_REVIEW_MAX_PAGES:
         review_pages = review_pages[:_VISUAL_REVIEW_MAX_PAGES]
 
     if not review_pages:
