@@ -612,6 +612,33 @@ def _merge_adjacent_blocks(
     return translated_texts, bboxes, font_sizes
 
 
+def _find_neighbor_y1_limit(
+    block_idx: int,
+    insert_bboxes: list,
+    gap: float = 2.0,
+) -> float:
+    """Find the max y1 for downward expansion of block_idx without overlapping neighbors.
+
+    Looks for blocks whose y0 is below the current block's y0 and whose
+    x-range overlaps with the current block.  Returns the nearest such
+    neighbor's y0 minus *gap*, or +inf if no neighbor is found below.
+    """
+    cur = insert_bboxes[block_idx]
+    best_y0 = float("inf")
+    for j, other in enumerate(insert_bboxes):
+        if j == block_idx:
+            continue
+        # Only consider blocks whose top edge is below the current block's top edge
+        if other.y0 <= cur.y0:
+            continue
+        # Check x-overlap: the two rects must share some horizontal range
+        x_overlap = min(cur.x1, other.x1) - max(cur.x0, other.x0)
+        if x_overlap <= 0:
+            continue
+        if other.y0 < best_y0:
+            best_y0 = other.y0
+    return best_y0 - gap
+
 
 def render_page(
     page: fitz.Page,
@@ -803,14 +830,9 @@ def render_page(
                 table_cell_mask[i] = True
                 break
 
-    # Cap insert_bbox to original block bbox for table cells
-    capped_insert_bboxes = []
-    for i, ibbox in enumerate(insert_bboxes):
-        if table_cell_mask[i] and i < len(orig_bboxes):
-            capped_insert_bboxes.append(orig_bboxes[i])
-        else:
-            capped_insert_bboxes.append(ibbox)
-    insert_bboxes = capped_insert_bboxes
+    # REQ-2: For table cells, keep insert_bbox from space_planner
+    # (already column-width-capped) instead of reverting to orig_bbox,
+    # which may be too narrow for translated text (e.g. lidar→LiDAR).
 
     # ------------------------------------------------------------------
     # Step 9: Phase 2 — compute fitting_sizes via VisualOptimizer
@@ -838,6 +860,10 @@ def render_page(
                 align=aligns[i],
                 page_rect=page_rect,
             )
+            # Clamp downward expansion to avoid overlapping neighbor blocks
+            neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
+            if expanded.y1 > neighbor_y1_limit:
+                expanded = fitz.Rect(expanded.x0, expanded.y0, expanded.x1, neighbor_y1_limit)
             insert_bboxes[i] = expanded
             # Verify text actually fits at 8pt in expanded bbox; if not,
             # re-fit with a lower floor so text renders (small > invisible).
@@ -948,6 +974,10 @@ def render_page(
                 align=aligns[i],
                 page_rect=page_rect,
             )
+            # Clamp downward expansion to avoid overlapping neighbor blocks
+            neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
+            if expanded.y1 > neighbor_y1_limit:
+                expanded = fitz.Rect(expanded.x0, expanded.y0, expanded.x1, neighbor_y1_limit)
             insert_bboxes[i] = expanded
 
             # Check if expansion was sufficient — re-estimate overflow

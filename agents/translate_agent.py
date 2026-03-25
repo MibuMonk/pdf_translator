@@ -75,6 +75,43 @@ _SPAN_TAG_RE = re.compile(r'<s(\d+)>(.*?)</s\1>', re.DOTALL)
 # This avoids relying on the LLM to correctly reproduce \n in its JSON output.
 _NEWLINE_PLACEHOLDER = "⏎"
 
+# Bullet / list markers that indicate a semantic line break (not layout wrapping)
+_BULLET_RE = re.compile(
+    r'^[\s]*'           # optional leading whitespace
+    r'(?:'
+    r'[•■\-–·\*▶▷►▸◆◇○●]'   # common bullet characters
+    r'|\d+[.\)）]'              # numbered list: 1. 2) 3）
+    r')'
+)
+
+
+def _clean_layout_breaks(text: str) -> str:
+    """Replace layout-wrapping newlines with spaces, preserving semantic breaks.
+
+    PDF text often contains hard newlines inserted by the layout engine to fit
+    column widths.  These are *not* semantic paragraph breaks and should be
+    collapsed before translation so the LLM sees fluent sentences.
+
+    A newline is considered **semantic** (and kept) when the *next* line starts
+    with a bullet marker or numbered-list prefix.  All other newlines are
+    replaced with a single space.
+    """
+    if "\n" not in text:
+        return text
+
+    lines = text.split("\n")
+    result = [lines[0]]
+    for i in range(1, len(lines)):
+        if _BULLET_RE.match(lines[i]):
+            # Semantic break — keep the newline
+            result.append("\n")
+            result.append(lines[i])
+        else:
+            # Layout wrap — replace with space
+            result.append(" ")
+            result.append(lines[i])
+    return "".join(result)
+
 
 def _protect_newlines(text: str) -> str:
     """Replace real newlines with a placeholder before sending to LLM."""
@@ -469,7 +506,8 @@ def main():
                 plain_indices.append(i)
 
         # --- Translate plain blocks (original batch flow) ---
-        plain_texts = [blocks[i].get("text", "") for i in plain_indices]
+        # Clean layout-wrapping newlines before translation (L1 fix)
+        plain_texts = [_clean_layout_breaks(blocks[i].get("text", "")) for i in plain_indices]
         print(f"  [Page {page_num}] translating {len(blocks)} blocks "
               f"({len(span_indices)} span-aware)...", flush=True)
 
@@ -492,7 +530,11 @@ def main():
         if span_indices:
             span_tagged_texts = []
             for i in span_indices:
-                cs = blocks[i]["color_spans"]
+                # Clean layout-wrapping newlines in each span before tagging (L1 fix)
+                cs = [
+                    {**span, "text": _clean_layout_breaks(span["text"])}
+                    for span in blocks[i]["color_spans"]
+                ]
                 span_tagged_texts.append(_build_tagged_text(cs))
 
             span_translated = translate_texts(

@@ -82,6 +82,17 @@
 - insert_text_multicolor() 用 translated 的 \n 位置断行但从 spans 取字符，字数不匹配时断行位置错位，产生 "Sc enarios" 这样的断词
 - 已修复：入口处加字符数一致性 guard，不匹配时降级到单色 insert_text_fitting()
 
+### REQ-2 表格 cell bbox 退回过度（L1 断词）
+- REQ-2 把 table_cell 的 insert_bbox 退回原始 bbox，但原始 bbox 是源语言的字符宽度
+  翻译后文本可能更宽（如 lidar→LiDAR），22.5pt 的 bbox 放不下导致断词
+- 已修复：table_cell 保留 space_planner 计算的 insert_bbox，不退回原始 bbox
+
+### overflow_bbox 向下扩展侵入邻居 block（L6 bbox 重叠）
+- Step 10b overflow_bbox 扩展时不检查下方是否有其他 block
+  密集布局（如 P40 右侧窄列）中，扩展后的 bbox 与下方 block 重叠，文字互相覆盖
+- 已修复：扩展前检测下方最近邻居，y1 上限为 neighbor.y0 - 2pt
+  受限后放不下则缩小字号，不无限扩展
+
 ## I/O
 
 - 输入：源 PDF + translated.json + layout_plan.json
