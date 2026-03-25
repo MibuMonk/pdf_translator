@@ -3,6 +3,14 @@
 Translates PDFs (mainly slide decks) between languages while preserving layout.
 Uses Claude CLI for translation/analysis, PyMuPDF for parsing and rendering.
 
+## Prerequisites
+
+**API Key**: Before using the pipeline, create a `.env` file in the project root:
+```
+ANTHROPIC_API_KEY=your-api-key-here
+```
+The pipeline loads this automatically via `python-dotenv`. The `.env` file is gitignored.
+
 ## Working Modes
 
 Two skills define how to use this project. Read the user's intent and pick one.

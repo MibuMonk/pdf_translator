@@ -22,6 +22,12 @@ import tempfile
 import threading
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 AGENTS = Path(__file__).parent / "agents"
 
 

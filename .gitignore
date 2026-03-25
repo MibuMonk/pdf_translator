@@ -12,3 +12,6 @@ testdata/*/work_ja/
 
 # Debug artifacts
 testdata/*/page*_fixed.png
+
+# Secrets
+.env
