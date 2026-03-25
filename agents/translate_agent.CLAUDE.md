@@ -57,3 +57,9 @@ LLM 有时会把含品牌名/缩略词的短文本原样返回（认为是专有
 
 - 输入：parsed.json（consolidator 输出后的）
 - 输出：translated.json（contracts/translated.schema.json）
+
+### Span-aware 翻译路径丢失语义换行（L2 结构坍塌）
+- span-aware 路径的 translated 由 "".join(translated_spans) 生成
+  原始 text 中 span 之间的语义换行（\n• VVP...）被完全丢弃
+  导致多节内容挤成一坨，layout_agent 无法识别子节边界
+- 已修复：拼接时检查原始 color_spans 是否以 bullet marker 开头，是则在前面插入 \n
