@@ -69,6 +69,12 @@ def _starts_with_bullet(text: str) -> bool:
     return bool(stripped) and stripped[0] in BULLET_MARKERS
 
 
+def _starts_with_section_header(text: str) -> bool:
+    """True if text begins with ■ (U+25A0), a section header marker."""
+    stripped = text.lstrip()
+    return bool(stripped) and stripped[0] == "\u25a0"
+
+
 def _should_block_merge_on_ending(prev_text: str, next_text: str) -> bool:
     """
     Decide whether the hard-ending of *prev_text* should block merging with *next_text*.
@@ -240,6 +246,7 @@ def _merge_column(blocks: list, all_page_blocks: list,
         fs_ok = _fs_compatible(prev, block)
         color_ok = _color_compatible(prev, block)
         ends_hard = _should_block_merge_on_ending(prev["text"], block["text"])
+        section_header = _starts_with_section_header(block["text"])
 
         can_merge = (
             gap >= 0                          # no overlap
@@ -248,9 +255,29 @@ def _merge_column(blocks: list, all_page_blocks: list,
             and fs_ok                         # similar font sizes
             and color_ok                      # same color
             and not ends_hard                 # previous block doesn't close a sentence
+            and not section_header            # next block is a section header (■)
             and not prev_has_horiz            # not a table cell
             and not block_has_horiz           # not a table cell
         )
+
+        # Exception: section header (■) + bullet list across different colors.
+        # PDF slides often use colored headings with black bullet text.
+        # Allow merge when prev is ■-header and next starts with bullet marker,
+        # even if colors differ, as long as other geometric conditions are met.
+        cross_color_heading_bullet = False
+        if (not can_merge
+                and not color_ok
+                and gap >= 0 and gap <= Y_GAP_MAX
+                and _same_column(prev, block)
+                and fs_ok
+                and not ends_hard
+                and not section_header          # next is NOT a new ■ header
+                and not prev_has_horiz
+                and not block_has_horiz
+                and _starts_with_section_header(prev["text"])
+                and _starts_with_bullet(block["text"])):
+            can_merge = True
+            cross_color_heading_bullet = True
 
         if can_merge:
             # Record the merge: block.id is being absorbed into prev (which will get
@@ -261,7 +288,10 @@ def _merge_column(blocks: list, all_page_blocks: list,
             into_original_id = absorbed_ids[-1][0]
 
             # Build reason string
-            reason_parts = ["y_gap_ok", "same_column", "fs_compatible"]
+            if cross_color_heading_bullet:
+                reason_parts = ["cross_color_heading_bullet_merge"]
+            else:
+                reason_parts = ["y_gap_ok", "same_column", "fs_compatible"]
             merges_log.append({
                 "page": page_num,
                 "absorbed": [absorbed_original_id],
@@ -283,6 +313,8 @@ def _merge_column(blocks: list, all_page_blocks: list,
                     suspected_table_pages.add(page_num)
                 if ends_hard:
                     skip_reasons.append("ends_hard")
+                if section_header:
+                    skip_reasons.append("section_header_boundary")
                 if not fs_ok:
                     skip_reasons.append("fs_incompatible")
                 if not color_ok:

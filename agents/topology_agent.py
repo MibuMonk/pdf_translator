@@ -420,6 +420,40 @@ class TopologyAnalyzer:
             # Final guarantee after obstacle clipping
             x1 = max(x1, b.x1)
 
+            # ----------------------------------------------------------
+            # Clamp insert_bbox height for small blocks (L3 drift fix)
+            # ----------------------------------------------------------
+            orig_h = b.height
+            candidate_h = y1 - y0
+
+            # Rule 2: block entirely inside an image obstacle → caption/label
+            inside_obstacle = False
+            for obs in image_obstacles:
+                if (
+                    obs.x0 <= b.x0 + 2
+                    and obs.y0 <= b.y0 + 2
+                    and obs.x1 >= b.x1 - 2
+                    and obs.y1 >= b.y1 - 2
+                ):
+                    inside_obstacle = True
+                    # Clamp height to 1.5x original
+                    max_h = orig_h * 1.5
+                    if candidate_h > max_h:
+                        y1 = y0 + max_h
+                    # Clamp width to obstacle boundary
+                    x0 = max(x0, obs.x0)
+                    x1 = min(x1, obs.x1)
+                    # Re-guarantee bbox containment
+                    x0 = min(x0, b.x0)
+                    x1 = max(x1, b.x1)
+                    break
+
+            # Rule 1: small block height explosion guard
+            if not inside_obstacle and orig_h <= 30.0:
+                candidate_h = y1 - y0  # refresh after possible rule-2 edit
+                if candidate_h > orig_h * 3.0:
+                    y1 = y0 + orig_h * 2.5
+
             insert_bboxes.append(fitz.Rect(x0, y0, x1, y1))
 
         return insert_bboxes

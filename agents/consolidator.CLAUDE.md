@@ -22,6 +22,16 @@
     (parser-split continuation), unless prev is very short (heading-like,
     < `BULLET_CONT_MIN_CHARS` (4) chars after stripping marker) — avoids merging headings like "• 概要。"
   - Non-bullet text retains original behavior: hard ending blocks merge
+- `■`（U+25A0）开头的 block 是 section header 标记（如 `■ Scenarios`、`■ Configuration`）
+  每个 `■` block 都是独立语义单元，不应与前一个 block 合并
+  P18/P20 曾因颜色相同+y间距合格导致多个 section 被错误合并（L2 结构坍塌）
+  已修复：next block 文本以 `■` 开头时阻断合并，log reason="section_header_boundary"
+
+- PDF 中 section heading 常用蓝色/彩色，bullet 内容用黑色，颜色不同但语义上属于同一节
+  当 prev 以 `■` 开头（section header）且 next 以 bullet marker 开头时，即使颜色不兼容也允许合并
+  合并时 color_spans 保留双方各自的颜色
+  P17/P18 曾因颜色阻断导致 heading 和 bullet 分离（L4 段落碎片化）
+  已修复：cross_color_heading_bullet_merge 例外规则
 
 ## I/O
 

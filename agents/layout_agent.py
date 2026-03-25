@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import math
 import os
 import re
@@ -23,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from visual_agent import VisualOptimizer       # noqa: E402
 from topology_agent import TopologyAnalyzer    # noqa: E402
 from shared_utils import has_cjk, cluster      # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -321,6 +324,22 @@ def insert_text_multicolor(
     """
     if not text.strip():
         return
+
+    # --- Guard: span-text character count consistency ---
+    span_count = sum(len(sp["text"].replace("\n", "")) for sp in color_spans)
+    text_count = len(text.replace("\n", ""))
+    if span_count != text_count:
+        fallback_color = tuple(float(c) for c in color_spans[0]["color"]) if color_spans else (0, 0, 0)
+        logger.warning(
+            "multicolor fallback: span chars (%d) != text chars (%d), block bbox %s",
+            span_count, text_count, tuple(bbox),
+        )
+        insert_text_fitting(
+            page, bbox, text, base_size, fallback_color, align,
+            fontname=fontname, fontfile=fontfile,
+        )
+        return
+
     text = text.replace("\u3000", "\xa0")
     if bbox.width < 2 or bbox.height < 2:
         return

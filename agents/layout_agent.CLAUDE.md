@@ -76,6 +76,12 @@
 - Color format: RGB float tuples (0-1), same space as PyMuPDF `page.get_drawings()` fill values
 - All three adjust_color call sites updated: single-color, translated_spans, and color_spans paths
 
+### Multicolor span-text character count mismatch (L1 word split)
+- translate_agent 可能产出 translated_spans 总字符数 ≠ translated 总字符数的数据
+  （例如 spans 保留英文 "Scenarios"，translated 已翻译为 "场景"）
+- insert_text_multicolor() 用 translated 的 \n 位置断行但从 spans 取字符，字数不匹配时断行位置错位，产生 "Sc enarios" 这样的断词
+- 已修复：入口处加字符数一致性 guard，不匹配时降级到单色 insert_text_fitting()
+
 ## I/O
 
 - 输入：源 PDF + translated.json + layout_plan.json

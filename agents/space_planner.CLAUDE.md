@@ -16,6 +16,9 @@
 
 - title_indices 必须和 translated.json 的 block 顺序一致（都基于 consolidator 输出的 parsed.json）
 - 不携带颜色信息，颜色通过 block_id 回溯到 translated.json
+- Voronoi 对小 block（h≤30px）容易高度爆炸（页面底部无约束时可达 7~8x）
+  已加入扩展上限：小 block 最多 2.5x，图表标注块最多 1.5x
+  防止 L3 内容漂移（layout_agent 拿到过大 bbox 导致文字在大框里漂浮）
 
 ## I/O
 
