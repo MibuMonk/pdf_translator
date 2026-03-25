@@ -27,6 +27,9 @@ QA 检查，输出 test_report.json。
    - `multicolor_fallback`：block 有 color_spans（≥2色）但 translated_spans 字符数 ≠ translated 字符数（颜色降级信号），severity=warning
    - `structure_collapse_suspect`：单 block 字符数 >200、占页面文本面积 >50%、含 ≥3 个换行（结构坍塌信号），severity=warning
    - `word_split`：检测英文单词被 \n 切断（如 "Sc\nenarios"），severity=warning
+   - `number_unit_split`：从渲染 PDF 读视觉行，检测缩写/数字跨行断开（如 "UNP\n1000"、"8,000\nkm"），severity=warning
+     - `abbr_num`：行末为全大写缩写（≥2字符），下一行首为数字
+     - `num_unit`：行末为数字，下一行首为短词（≤5字符，单位等）
    - `bbox_overlap`：从 PDF 提取实际渲染文字块 bbox，检测同页内重叠（交集面积 > 较小者 10%），severity=error
 6. **regression_check**：与 baseline 对比的回归检测
 7. **page_confidence** (post-processing)：per-page confidence scoring based on all check findings

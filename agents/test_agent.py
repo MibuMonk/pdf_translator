@@ -954,6 +954,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
     - structure_collapse_suspect: single block dominating >50% page area with >200 chars
     - inconsistent_sizing: same-content pages with >30% font size difference
     - word_split: English word broken across \\n in translated text (e.g. "Sc\\nenarios")
+    - number_unit_split: abbr/number token wrapped across visual lines in PDF (e.g. "UNP\\n1000", "8,000\\nkm")
     - bbox_overlap: overlapping text block bboxes in rendered PDF (intersection > 10% of smaller)
     """
     with open(translated_json_path, encoding="utf-8") as f:
@@ -1203,6 +1204,58 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
                 })
                 word_split_per_page[page_num] += 1
 
+    # --- number_unit_split: detect abbr/number tokens wrapped across visual lines in PDF ---
+    # Catches "UNP\n1000", "MPI\n100", "8,000\nkm" patterns that preprocess() should have
+    # protected with \xa0. Reads visual lines from the rendered PDF (not translated.json),
+    # because the wrap only appears after layout_agent renders the text into the bbox.
+    _ABBR_TAIL = re.compile(r'[A-Z]{2,}$')       # line ends with all-caps abbr (≥2 chars)
+    _NUM_TAIL  = re.compile(r'[\d,]+\d$')          # line ends with a number (incl. "8,000")
+    _NUM_HEAD  = re.compile(r'^\d')                # next line starts with digit
+    _UNIT_HEAD = re.compile(r'^[A-Za-z]{1,5}\b')  # next line starts with short word (unit)
+    num_split_per_page: dict[int, int] = defaultdict(int)
+    NUM_SPLIT_PAGE_LIMIT = 5
+    try:
+        pdf_doc = fitz.open(str(pdf_path))
+        for page_idx in range(len(pdf_doc)):
+            page_num = page_idx + 1
+            page = pdf_doc[page_idx]
+            for blk in page.get_text("dict")["blocks"]:
+                if blk.get("type") != 0:
+                    continue
+                pdf_lines = blk.get("lines", [])
+                for li in range(len(pdf_lines) - 1):
+                    if num_split_per_page[page_num] >= NUM_SPLIT_PAGE_LIMIT:
+                        break
+                    line_a = "".join(s["text"] for s in pdf_lines[li].get("spans", [])).rstrip()
+                    line_b = "".join(s["text"] for s in pdf_lines[li + 1].get("spans", [])).lstrip()
+                    if not line_a or not line_b:
+                        continue
+                    # abbr→num: "UNP" / "1000"
+                    if _ABBR_TAIL.search(line_a) and _NUM_HEAD.match(line_b):
+                        issues.append({
+                            "page": page_num,
+                            "type": "number_unit_split",
+                            "severity": "warning",
+                            "split_at": f"...{line_a[-8:]}\\n{line_b[:8]}...",
+                            "pattern": "abbr_num",
+                        })
+                        num_split_per_page[page_num] += 1
+                    # num→unit: "8,000" / "km"
+                    elif _NUM_TAIL.search(line_a) and _UNIT_HEAD.match(line_b):
+                        head_word = _UNIT_HEAD.match(line_b).group(0)
+                        if len(head_word) <= 5:
+                            issues.append({
+                                "page": page_num,
+                                "type": "number_unit_split",
+                                "severity": "warning",
+                                "split_at": f"...{line_a[-8:]}\\n{line_b[:8]}...",
+                                "pattern": "num_unit",
+                            })
+                            num_split_per_page[page_num] += 1
+        pdf_doc.close()
+    except Exception:
+        pass
+
     # --- inconsistent_sizing: pages with similar first-block text but different font_size ---
     for i in range(len(page_first_blocks)):
         for j in range(i + 1, len(page_first_blocks)):
@@ -1267,6 +1320,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
             "multicolor_fallback_count": sum(1 for i in issues if i["type"] == "multicolor_fallback"),
             "structure_collapse_suspect_count": sum(1 for i in issues if i["type"] == "structure_collapse_suspect"),
             "word_split_count": sum(1 for i in issues if i["type"] == "word_split"),
+            "number_unit_split_count": sum(1 for i in issues if i["type"] == "number_unit_split"),
             "bbox_overlap_count": sum(1 for i in issues if i["type"] == "bbox_overlap"),
         },
     }

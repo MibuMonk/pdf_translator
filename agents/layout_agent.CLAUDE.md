@@ -99,6 +99,12 @@
 - 已修复：Step 9b/10b 调用 overflow_bbox 前先调 `_find_safe_expand_x_limits()`
   生成受邻居约束的 constrained_rect 传入 overflow_bbox
 
+### preprocess() 数字/缩写与单位之间的断行
+- `_NUM_UNIT_RE`：`(\d)[ \t]+([A-Za-z])` → 数字后跟 ASCII 单位（如 "8,000 km"）
+- `_UNIT_NUM_RE`：`([A-Za-z])[ \t]+(\d)` → ASCII 缩写后跟数字（如 "UNP 1000"、"MPI 100"）
+- 两者均将空格替换为 `\xa0`，防止 PDF 渲染时在此位置折行
+- test_agent 的 `number_unit_split` 检测从渲染 PDF 读视觉行，可以回归验证此类断行是否仍然存在
+
 ### preprocess() 消费显式 \n（折行位置错误）
 - `_EN_CJK_RE` / `_CJK_EN_RE` 用 `\s+` 匹配 ASCII/CJK 边界并插入 `\xa0`
   `\s+` 包含 `\n`，所以 `"UNP CUTIN\n衝突"` 中的 `\n` 被替换为 `\xa0`，显式折行丢失
