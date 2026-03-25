@@ -41,7 +41,7 @@
     "issue_results": {
       "type": "object",
       "description": "Translation QA checks (coverage_check, quality_check) and optional regression_check.",
-      "required": ["coverage_check", "quality_check", "linebreak_consistency_check", "mixed_language_check", "terminology_consistency_check"],
+      "required": ["coverage_check", "quality_check", "linebreak_consistency_check", "mixed_language_check", "terminology_consistency_check", "fragmentation_check"],
       "properties": {
         "regression_check": {
           "type": "object",
@@ -207,6 +207,33 @@
                   }
                 },
                 "total_checked": { "type": "integer" }
+              }
+            }
+          }
+        },
+        "fragmentation_check": {
+          "type": "object",
+          "description": "Detects paragraph fragmentation where heading and bullet blocks are incorrectly split.",
+          "required": ["check_result", "details"],
+          "properties": {
+            "check_result": { "type": "string", "enum": ["pass", "fail"] },
+            "details": {
+              "type": "object",
+              "properties": {
+                "issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["page", "block_ids", "type", "severity", "text_preview"],
+                    "properties": {
+                      "page":         { "type": "integer" },
+                      "block_ids":    { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
+                      "type":         { "type": "string", "enum": ["section_fragmentation"] },
+                      "severity":     { "type": "string", "enum": ["warning"] },
+                      "text_preview": { "type": "string" }
+                    }
+                  }
+                }
               }
             }
           }

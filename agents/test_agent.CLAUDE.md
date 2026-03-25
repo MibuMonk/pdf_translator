@@ -30,6 +30,8 @@ QA 检查，输出 test_report.json。
    - `bbox_overlap`：从 PDF 提取实际渲染文字块 bbox，检测同页内重叠（交集面积 > 较小者 10%），severity=error
 6. **regression_check**：与 baseline 对比的回归检测
 7. **page_confidence** (post-processing)：per-page confidence scoring based on all check findings
+8. **fragmentation_check**：段落碎片化检测（不依赖 LLM）
+   - `section_fragmentation`：■ heading 独立为一个 block，• bullets 在另一个 block（同列、y 间距小），severity=warning
 
 ## Per-page Confidence Scoring
 
