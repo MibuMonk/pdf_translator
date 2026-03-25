@@ -659,6 +659,9 @@ def mixed_language_check(translated_json_path: str) -> dict:
 # terminology_consistency_check — detect inconsistent translations of the same term
 # ---------------------------------------------------------------------------
 
+# Regex: CJK unified ideographs (BMP + Ext-A + CJK compat ideographs + SIP)
+_CJK_RE = re.compile(r'[\u3000-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f]')
+
 # Known variant pairs: (variant_a, variant_b, description)
 # These are CJK translation variants that indicate inconsistency
 _VARIANT_PAIRS = [
