@@ -194,6 +194,7 @@ def _find_fitting_size(
     align: int,
     fontname: Optional[str] = None,
     min_size: float = 4.0,
+    fontfile: Optional[str] = None,
 ) -> float:
     """Binary-search for the largest font size that fits *text* inside *bbox*.
 
@@ -209,24 +210,56 @@ def _find_fitting_size(
     fn = fontname or "helv"
 
     if has_cjk(text):
-        # insert_textbox with "helv" cannot measure CJK — use em-width estimation instead
-        lo, hi = min_size, base_size
-        result = min_size
-        for _ in range(10):
-            mid = (lo + hi) / 2.0
-            if mid < 0.5:
-                break
-            lines_needed = _estimate_lines_needed(text, mid, bbox.width)
-            if lines_needed == 1:
-                height_needed = mid  # single line: no inter-line spacing
-            else:
-                height_needed = lines_needed * mid * _LINE_HEIGHT_FACTOR
-            if height_needed <= bbox.height and bbox.width >= mid:
-                result = mid
-                lo = mid
-            else:
-                hi = mid
-        return result
+        if fontfile:
+            shape = page.new_shape()
+            rc = shape.insert_textbox(
+                bbox, text,
+                fontsize=base_size,
+                fontname=fn,
+                fontfile=fontfile,
+                align=align,
+                lineheight=_LINE_HEIGHT_FACTOR,
+            )
+            if rc >= 0:
+                return base_size
+
+            lo, hi = min_size, base_size
+            result = min_size
+            for _ in range(10):
+                mid = (lo + hi) / 2.0
+                shape = page.new_shape()
+                rc = shape.insert_textbox(
+                    bbox, text,
+                    fontsize=mid,
+                    fontname=fn,
+                    fontfile=fontfile,
+                    align=align,
+                    lineheight=_LINE_HEIGHT_FACTOR,
+                )
+                if rc >= 0:
+                    result = mid
+                    lo = mid
+                else:
+                    hi = mid
+            return result
+        else:
+            lo, hi = min_size, base_size
+            result = min_size
+            for _ in range(10):
+                mid = (lo + hi) / 2.0
+                if mid < 0.5:
+                    break
+                lines_needed = _estimate_lines_needed(text, mid, bbox.width)
+                if lines_needed == 1:
+                    height_needed = mid
+                else:
+                    height_needed = lines_needed * mid * _LINE_HEIGHT_FACTOR
+                if height_needed <= bbox.height and bbox.width >= mid:
+                    result = mid
+                    lo = mid
+                else:
+                    hi = mid
+            return result
 
     # ASCII pre-check at base_size
     shape = page.new_shape()
@@ -387,7 +420,7 @@ def insert_text_multicolor(
     dominant_color = segments[0][1] if segments else (0, 0, 0)
     fit_size = _find_fitting_size(
         page, bbox, full_text, base_size, dominant_color, align,
-        fontname=fn, min_size=4.0,
+        fontname=fn, min_size=4.0, fontfile=fontfile,
     )
     render_size = fit_size
 
@@ -469,7 +502,7 @@ def insert_text_fitting(
 
     fit_size = _find_fitting_size(
         page, bbox, text, base_size, color, align,
-        fontname=fn, min_size=min_size,
+        fontname=fn, min_size=min_size, fontfile=fontfile,
     )
 
     # Commit via Shape — if the em-width estimated fit_size doesn't actually
@@ -482,14 +515,16 @@ def insert_text_fitting(
         """Try to render text at *size*; return True if successful."""
         try:
             s = page.new_shape()
-            rc = s.insert_textbox(
-                bbox, text,
+            kw = dict(
                 fontsize=size,
                 fontname=fn,
                 color=color,
                 align=align,
                 lineheight=_LINE_HEIGHT_FACTOR,
             )
+            if fontfile:
+                kw["fontfile"] = fontfile
+            rc = s.insert_textbox(bbox, text, **kw)
             if rc >= 0:
                 s.commit()
                 return True
@@ -507,14 +542,16 @@ def insert_text_fitting(
         mid_s = (lo_s + hi_s) / 2.0
         try:
             s = page.new_shape()
-            rc = s.insert_textbox(
-                bbox, text,
+            kw = dict(
                 fontsize=mid_s,
                 fontname=fn,
                 color=color,
                 align=align,
                 lineheight=_LINE_HEIGHT_FACTOR,
             )
+            if fontfile:
+                kw["fontfile"] = fontfile
+            rc = s.insert_textbox(bbox, text, **kw)
             if rc >= 0:
                 best_s = mid_s
                 lo_s = mid_s

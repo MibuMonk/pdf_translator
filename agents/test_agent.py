@@ -1329,6 +1329,138 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
 
 
 # ---------------------------------------------------------------------------
+# glyph_dropout_check — detect characters lost during PDF rendering
+# ---------------------------------------------------------------------------
+
+def _collect_spans_in_bbox(spans, bbox, tolerance=5.0):
+    """Collect all PDF spans whose bbox overlaps with the target bbox."""
+    tx0, ty0, tx1, ty1 = bbox
+    matched = []
+    for span in spans:
+        sx0, sy0, sx1, sy1 = span["bbox"]
+        # Check overlap: span must be within the vertical range and
+        # have some horizontal overlap with the target bbox
+        if sy1 < ty0 - tolerance or sy0 > ty1 + tolerance:
+            continue
+        if sx1 < tx0 - tolerance or sx0 > tx1 + tolerance:
+            continue
+        matched.append(span)
+    return matched
+
+
+def glyph_dropout_check(translated_json_path: str, pdf_path: str) -> dict:
+    """
+    Check for glyph dropout (L7): characters present in translated.json but
+    missing from the rendered PDF.  Compares per-block translated text against
+    the concatenated text of overlapping PDF spans.
+
+    Returns dict with "check_result" ("pass"/"fail") and "details" containing
+    "issues" list.  Each issue has page, block_index, severity, code, message.
+    """
+    import unicodedata
+
+    with open(translated_json_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, list):
+        pages = data
+    elif isinstance(data, dict):
+        pages = data.get("pages", [data])
+    else:
+        return {"check_result": "fail", "details": {"issues": [], "error": "Unexpected JSON structure"}}
+
+    pdf_spans = extract_pdf_spans_by_page(Path(pdf_path))
+    issues: list[dict] = []
+
+    for page_entry in pages:
+        if not isinstance(page_entry, dict):
+            continue
+        page_num = page_entry.get("page", page_entry.get("page_num", 0))
+        blocks = page_entry.get("blocks", [])
+        spans = pdf_spans.get(page_num, [])
+
+        for idx, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                continue
+            translated = (block.get("translated") or "").strip()
+            if not translated:
+                continue
+
+            bbox = block.get("bbox", [0, 0, 0, 0])
+            block_id = block.get("block_id", block.get("id", f"p{page_num:02d}_b{idx:03d}"))
+
+            # Collect all PDF spans overlapping this block's bbox
+            matched_spans = _collect_spans_in_bbox(spans, bbox, tolerance=10.0)
+            rendered_text = "".join(s["text"] for s in matched_spans)
+
+            # Normalize: strip whitespace, normalize unicode for both strings
+            def _normalize(s):
+                s = unicodedata.normalize("NFC", s)
+                # Remove all whitespace
+                return re.sub(r'\s+', '', s)
+
+            norm_translated = _normalize(translated)
+            norm_rendered = _normalize(rendered_text)
+
+            if not norm_translated:
+                continue
+
+            # Skip very short blocks (single char) — too noisy
+            if len(norm_translated) <= 1:
+                continue
+
+            # Count how many unique chars from translated are missing in rendered
+            rendered_chars = set(norm_rendered)
+            missing_chars = []
+            for ch in norm_translated:
+                if ch not in rendered_chars:
+                    missing_chars.append(ch)
+
+            # Deduplicate for reporting
+            unique_missing = list(dict.fromkeys(missing_chars))
+            if not unique_missing:
+                continue
+
+            # Calculate dropout ratio (missing char occurrences / total chars)
+            dropout_ratio = len(missing_chars) / len(norm_translated)
+
+            # Tolerance: allow up to 10% dropout or <= 1 missing unique char
+            # for short texts (< 20 chars)
+            if len(norm_translated) < 20 and len(unique_missing) <= 1:
+                continue
+            if dropout_ratio <= 0.10:
+                continue
+
+            severity = "error" if dropout_ratio > 0.25 else "warning"
+            sample = "".join(unique_missing[:10])
+            issues.append({
+                "page": page_num,
+                "block_index": idx,
+                "block_id": block_id,
+                "severity": severity,
+                "code": "L7",
+                "type": "glyph_dropout",
+                "message": (
+                    f"Glyph dropout: {len(unique_missing)} unique char(s) missing "
+                    f"({dropout_ratio:.0%} of text). "
+                    f"Missing sample: '{sample}'"
+                ),
+                "dropout_ratio": round(dropout_ratio, 3),
+                "missing_count": len(missing_chars),
+                "translated_length": len(norm_translated),
+            })
+
+    has_errors = any(i.get("severity") == "error" for i in issues)
+    return {
+        "check_result": "fail" if has_errors else "pass",
+        "details": {
+            "issues": issues,
+            "glyph_dropout_count": len(issues),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # fragmentation_check — detect heading/bullet split across blocks
 # ---------------------------------------------------------------------------
 
@@ -2020,7 +2152,7 @@ def _extract_page_findings(issue_results: dict) -> list[dict]:
                 if "page" in iss and "severity" in iss:
                     findings.append({"page": iss["page"], "severity": iss["severity"]})
 
-        elif check_name in ("linebreak_consistency_check", "mixed_language_check", "fragmentation_check"):
+        elif check_name in ("linebreak_consistency_check", "mixed_language_check", "fragmentation_check", "glyph_dropout_check"):
             if isinstance(details, dict):
                 for iss in details.get("issues", []):
                     if "page" in iss and "severity" in iss:
@@ -2303,6 +2435,15 @@ def run_checks(testcase: str, registry_path: Path, output_path: Path,
         summary["failed"] += 1
     print(f"  readability_check: {rd_result['check_result'].upper()}")
 
+    print("Running glyph_dropout_check...")
+    gd_result = glyph_dropout_check(str(translated_json_path), str(output_pdf_path))
+    summary["total"] += 1
+    if gd_result["check_result"] == "pass":
+        summary["passed"] += 1
+    else:
+        summary["failed"] += 1
+    print(f"  glyph_dropout_check: {gd_result['check_result'].upper()}")
+
     # Run regression checks if baseline exists
     regression_result = run_regression(testcase)
     if regression_result is not None:
@@ -2319,6 +2460,7 @@ def run_checks(testcase: str, registry_path: Path, output_path: Path,
         "style_check":    style_result,
         "translation_completeness_check": tc_result,
         "readability_check": rd_result,
+        "glyph_dropout_check": gd_result,
     }
     if regression_result is not None:
         issue_results["regression_check"] = regression_result
@@ -2400,11 +2542,16 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str,
     print(f"  fragmentation_check: {frag_result['check_result'].upper()}")
 
     rd_result = {"check_result": "skipped", "reason": "no PDF provided"}
+    gd_result = {"check_result": "skipped", "reason": "no PDF provided"}
     if pdf_path:
         print("Running readability_check...")
         rd_result = readability_check(translated_json, pdf_path,
                                       source_pdf_path=source_pdf if source_pdf else None)
         print(f"  readability_check: {rd_result['check_result'].upper()}")
+
+        print("Running glyph_dropout_check...")
+        gd_result = glyph_dropout_check(translated_json, pdf_path)
+        print(f"  glyph_dropout_check: {gd_result['check_result'].upper()}")
 
     # Print coverage summary
     if "details" in cov_result and isinstance(cov_result["details"], dict):
@@ -2424,7 +2571,7 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str,
         print(bold("\nRendering thumbnails..."))
         render_thumbnails(pdf_path, thumbs)
 
-    all_checks = [cov_result, qual_result, style_result, tc_result, lb_result, ml_result, term_result, frag_result, rd_result]
+    all_checks = [cov_result, qual_result, style_result, tc_result, lb_result, ml_result, term_result, frag_result, rd_result, gd_result]
     passed = all(r["check_result"] in ("pass", "skipped") for r in all_checks)
 
     report = {
@@ -2448,6 +2595,7 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str,
             "terminology_consistency_check": term_result,
             "fragmentation_check": frag_result,
             "readability_check": rd_result,
+            "glyph_dropout_check": gd_result,
         },
     }
 

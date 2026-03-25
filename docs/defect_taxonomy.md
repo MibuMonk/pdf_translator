@@ -73,6 +73,16 @@ expanded bboxes.
 
 **Affected stage:** layout_agent (overflow expansion without neighbor awareness).
 
+### L7: Glyph Dropout (字形丢失)
+
+**Symptom:** Individual characters from the translated text are missing in the rendered PDF.
+The text appears with gaps or spaces where characters should be (e.g. "量 化" instead of "量产化").
+
+**Mechanism:** The layout engine's font size estimation doesn't match actual font rendering.
+When text overflows the bbox, `page.insert_textbox()` silently truncates characters without error.
+
+**Affected stage:** layout_agent (rendering — font fitting or textbox insertion).
+
 ## Translation Defects
 
 ### T1: Missing Translation (未翻译)
