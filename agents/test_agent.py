@@ -853,6 +853,8 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
     Check for readability issues in the rendered output.
     - text_too_small: rendered font size < 8pt
     - content_truncated: translated text far exceeds bbox capacity (>2x)
+    - multicolor_fallback: color_spans block with mismatched translated_spans char count
+    - structure_collapse_suspect: single block dominating >50% page area with >200 chars
     - inconsistent_sizing: same-content pages with >30% font size difference
     """
     with open(translated_json_path, encoding="utf-8") as f:
@@ -962,6 +964,95 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
                                 "ratio": round(ratio, 2),
                             })
 
+    # --- multicolor_fallback_check: detect color degradation ---
+    # When a block has color_spans (>=2 distinct colors) but translated_spans
+    # total char count != translated char count, layout_agent will fall back to
+    # single-color rendering, losing all color information.
+    for page_entry in pages:
+        if not isinstance(page_entry, dict):
+            continue
+        page_num = page_entry.get("page", page_entry.get("page_num", 0))
+        for idx, block in enumerate(page_entry.get("blocks", [])):
+            if not isinstance(block, dict):
+                continue
+            color_spans = block.get("color_spans")
+            if not color_spans or not isinstance(color_spans, list):
+                continue
+            # Check for >=2 distinct colors
+            distinct_colors = set()
+            for cs in color_spans:
+                if isinstance(cs, dict) and "color" in cs:
+                    c = cs["color"]
+                    if isinstance(c, (list, tuple)):
+                        distinct_colors.add(tuple(c))
+            if len(distinct_colors) < 2:
+                continue
+            translated_spans = block.get("translated_spans")
+            translated = block.get("translated", "")
+            if not translated_spans or not isinstance(translated_spans, list):
+                continue
+            span_chars = sum(len((s.get("text", "") if isinstance(s, dict) else "").replace("\n", "")) for s in translated_spans)
+            text_chars = len(translated.replace("\n", ""))
+            if span_chars != text_chars:
+                block_id = block.get("block_id", block.get("id", f"p{page_num:02d}_b{idx:03d}"))
+                issues.append({
+                    "page": page_num,
+                    "block_id": block_id,
+                    "type": "multicolor_fallback",
+                    "severity": "warning",
+                    "span_chars": span_chars,
+                    "text_chars": text_chars,
+                })
+
+    # --- block_density_check: detect structure collapse ---
+    # A single block occupying >50% of total text area on a page with >200 chars
+    # and >=3 newlines is a strong signal that L2 structure collapsed into one block.
+    for page_entry in pages:
+        if not isinstance(page_entry, dict):
+            continue
+        page_num = page_entry.get("page", page_entry.get("page_num", 0))
+        blocks = page_entry.get("blocks", [])
+        # Compute total text block area on this page
+        block_areas = []
+        for idx, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                block_areas.append(0.0)
+                continue
+            translated = (block.get("translated") or "").strip()
+            if not translated:
+                block_areas.append(0.0)
+                continue
+            bbox = block.get("bbox", [0, 0, 0, 0])
+            if len(bbox) >= 4:
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+                block_areas.append(max(w, 0) * max(h, 0))
+            else:
+                block_areas.append(0.0)
+        total_area = sum(block_areas)
+        if total_area <= 0:
+            continue
+        for idx, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                continue
+            translated = block.get("translated") or ""
+            char_count = len(translated)
+            if char_count <= 200:
+                continue
+            if translated.count("\n") < 3:
+                continue
+            area_pct = block_areas[idx] / total_area
+            if area_pct > 0.50:
+                block_id = block.get("block_id", block.get("id", f"p{page_num:02d}_b{idx:03d}"))
+                issues.append({
+                    "page": page_num,
+                    "block_id": block_id,
+                    "type": "structure_collapse_suspect",
+                    "severity": "warning",
+                    "char_count": char_count,
+                    "bbox_area_pct": round(area_pct * 100, 1),
+                })
+
     # --- inconsistent_sizing: pages with similar first-block text but different font_size ---
     for i in range(len(page_first_blocks)):
         for j in range(i + 1, len(page_first_blocks)):
@@ -984,13 +1075,19 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
                         })
 
     has_errors = any(i.get("severity") == "error" for i in issues)
+    has_structural_warnings = any(
+        i.get("type") in ("multicolor_fallback", "structure_collapse_suspect")
+        for i in issues
+    )
     return {
-        "check_result": "fail" if has_errors else "pass",
+        "check_result": "fail" if (has_errors or has_structural_warnings) else "pass",
         "details": {
             "issues": issues,
             "text_too_small_count": sum(1 for i in issues if i["type"] == "text_too_small"),
             "content_truncated_count": sum(1 for i in issues if i["type"] == "content_truncated"),
             "inconsistent_sizing_count": sum(1 for i in issues if i["type"] == "inconsistent_sizing"),
+            "multicolor_fallback_count": sum(1 for i in issues if i["type"] == "multicolor_fallback"),
+            "structure_collapse_suspect_count": sum(1 for i in issues if i["type"] == "structure_collapse_suspect"),
         },
     }
 

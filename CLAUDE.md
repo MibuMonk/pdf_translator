@@ -79,6 +79,31 @@ Consolidator must produce semantically complete blocks before translation. layou
 - 只招聘有明确需求的 agent，不为假设需求预建
 - 所有新 agent 的 I/O 合约先定义，再实现
 
+## Defect Response Protocol
+
+When a rendering/translation defect is found (by user or test_agent):
+
+```
+1. DEFINE    — Classify using docs/defect_taxonomy.md codes (L1-L6, T1-T3).
+              Add new codes if needed. Update taxonomy before proceeding.
+
+2. TEST      — Can test_agent detect this defect? If NO → fix test_agent FIRST.
+              Quality gate must work before fixing what it gates.
+
+3. DIAGNOSE  — Dispatch diagnostic agent (background) to read intermediate data
+              (parsed.json, translated.json, layout_plan.json) and locate root cause.
+
+4. FIX       — Dispatch fix agents (background, parallel if independent).
+              Return to user immediately after dispatch.
+
+5. VERIFY    — Run: scripts/verify.sh <testcase> [pages]
+              Auto-runs pipeline + test_agent + exports problem pages as PNG.
+              Present results to user.
+```
+
+Steps are sequential — never skip ahead. If step 2 reveals a test_agent gap,
+complete step 2 before starting step 3.
+
 ## TODO
 
 - [x] consolidator: `_ends_hard` too conservative for bullet points — fixed with `_should_block_merge_on_ending()` context-aware check

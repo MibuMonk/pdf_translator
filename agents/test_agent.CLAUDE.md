@@ -24,6 +24,8 @@ QA 检查，输出 test_report.json。
      - bbox 面积 < 2000px²：始终 severity=warning（源文件固有空间限制）
      - bbox 面积 >= 2000px²：ratio > 3.0 → error，2.0–3.0 → warning
    - `inconsistent_sizing`：两页 block[0] 文本相似度 > 80% 但 font_size 差异 > 30%，severity=warning
+   - `multicolor_fallback`：block 有 color_spans（≥2色）但 translated_spans 字符数 ≠ translated 字符数（颜色降级信号），severity=warning
+   - `structure_collapse_suspect`：单 block 字符数 >200、占页面文本面积 >50%、含 ≥3 个换行（结构坍塌信号），severity=warning
 6. **regression_check**：与 baseline 对比的回归检测
 7. **page_confidence** (post-processing)：per-page confidence scoring based on all check findings
 
@@ -89,6 +91,11 @@ python test_agent.py --testcase 成果物4 --save-baseline
 ## Lessons Learned
 
 - **Pure-ASCII skip rule**: `_is_pure_ascii()` guards both `unchanged_translation` (coverage_check) and `untranslated_content` (translation_completeness_check). Regex `^[\x20-\x7E\t\n\r]*$` covers printable ASCII plus whitespace. If ANY non-ASCII character is present (CJK, kana, hangul, accented Latin, etc.), the block is still flagged. This eliminates false positives from product names ("HONDA"), abbreviations ("API"), and technical terms ("Wi-Fi") while preserving detection of genuinely untranslated CJK content.
+
+### readability_check 盲区修复
+- 曾对 P19（L2 结构坍塌、颜色全丢）给出 PASS，因为只检查字号和截断
+- 新增 multicolor_fallback_check：检测 translated_spans 与 translated 字符数不匹配（颜色降级信号）
+- 新增 block_density_check：检测单 block 独占 >50% 页面面积且字符数 >200（结构坍塌信号）
 
 ## 运行模式
 
