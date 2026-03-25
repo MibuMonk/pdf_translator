@@ -122,8 +122,12 @@ def extract_pdf_spans_by_page(pdf_path: Path) -> dict:
 def extract_pdf_text_block_bboxes_by_page(pdf_path: Path) -> dict:
     """
     Return dict: page_num (1-based) -> list of bbox [x0, y0, x1, y1]
-    for each text block in the PDF.  Only includes text blocks (type 0)
-    with non-empty text and area >= 100 px².
+    for each text LINE in the PDF.  Only includes lines with non-empty text
+    and area >= 100 px².
+
+    Using line-level bboxes avoids false positives from PyMuPDF merging
+    spatially distant lines (different physical columns) into one block
+    when they share the same font/size/color.
     """
     doc = fitz.open(str(pdf_path))
     result = {}
@@ -135,37 +139,39 @@ def extract_pdf_text_block_bboxes_by_page(pdf_path: Path) -> dict:
         for block in blocks:
             if block.get("type") != 0:
                 continue
-            bbox = block.get("bbox")
-            if not bbox:
-                continue
-            x0, y0, x1, y1 = bbox
-            w = x1 - x0
-            h = y1 - y0
-            if w * h < 100:
-                continue
-            # Check block has actual text
-            has_text = False
             for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    if span.get("text", "").strip():
-                        has_text = True
-                        break
-                if has_text:
-                    break
-            if has_text:
+                has_text = any(
+                    span.get("text", "").strip()
+                    for span in line.get("spans", [])
+                )
+                if not has_text:
+                    continue
+                bbox = line.get("bbox")
+                if not bbox:
+                    continue
+                x0, y0, x1, y1 = bbox
+                if (x1 - x0) * (y1 - y0) < 100:
+                    continue
                 bboxes.append(list(bbox))
         result[page_num] = bboxes
     doc.close()
     return result
 
 
-def _check_bbox_overlaps(page_bboxes: dict) -> list[dict]:
+def _check_bbox_overlaps(page_bboxes: dict, source_overlap_keys: set = None) -> list[dict]:
     """
     For each page, check all pairs of text block bboxes for overlap.
     Returns a list of bbox_overlap issues.
     An overlap is reported when the intersection area exceeds 10% of the
     smaller bbox's area.  Max 5 overlap issues per page.
+
+    source_overlap_keys: optional set of (page, bbox_a_rounded, bbox_b_rounded)
+    tuples from the source PDF — overlaps matching a baseline entry are skipped
+    (they pre-exist and were not introduced by the pipeline).
     """
+    def _rnd5(bbox):
+        return tuple(round(v / 5) * 5 for v in bbox)
+
     issues = []
     for page_num, bboxes in page_bboxes.items():
         page_issues = []
@@ -192,6 +198,10 @@ def _check_bbox_overlaps(page_bboxes: dict) -> list[dict]:
                 if min_area <= 0:
                     continue
                 if inter_area > min_area * 0.10:
+                    if source_overlap_keys:
+                        key = (page_num, _rnd5(bboxes[i]), _rnd5(bboxes[j]))
+                        if key in source_overlap_keys:
+                            continue
                     page_issues.append({
                         "page": page_num,
                         "type": "bbox_overlap",
@@ -935,7 +945,7 @@ def terminology_consistency_check(translated_json_path: str) -> dict:
     }
 
 
-def readability_check(translated_json_path: str, pdf_path: str) -> dict:
+def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path: str = None) -> dict:
     """
     Check for readability issues in the rendered output.
     - text_too_small: rendered font size < 8pt
@@ -1215,8 +1225,31 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
                         })
 
     # --- bbox_overlap: detect overlapping text blocks in rendered PDF ---
+    # If source_pdf_path is provided, compute baseline overlaps from the source
+    # and filter them out — only NEW overlaps introduced by the pipeline are flagged.
     pdf_block_bboxes = extract_pdf_text_block_bboxes_by_page(Path(pdf_path))
-    overlap_issues = _check_bbox_overlaps(pdf_block_bboxes)
+    source_overlap_keys: set = set()
+    if source_pdf_path:
+        src_bboxes = extract_pdf_text_block_bboxes_by_page(Path(source_pdf_path))
+        def _rnd5(bbox):
+            return tuple(round(v / 5) * 5 for v in bbox)
+        for pg, bboxes in src_bboxes.items():
+            n = len(bboxes)
+            for i in range(n):
+                ax0, ay0, ax1, ay1 = bboxes[i]
+                for j in range(i + 1, n):
+                    bx0, by0, bx1, by1 = bboxes[j]
+                    ix0 = max(ax0, bx0); iy0 = max(ay0, by0)
+                    ix1 = min(ax1, bx1); iy1 = min(ay1, by1)
+                    if ix0 >= ix1 or iy0 >= iy1:
+                        continue
+                    inter_area = (ix1 - ix0) * (iy1 - iy0)
+                    min_area = min((ax1-ax0)*(ay1-ay0), (bx1-bx0)*(by1-by0))
+                    if min_area > 0 and inter_area > min_area * 0.10:
+                        # Key: (page, rounded bbox_a, rounded bbox_b)
+                        # Use 5pt rounding so minor float drift doesn't miss the match
+                        source_overlap_keys.add((pg, _rnd5(bboxes[i]), _rnd5(bboxes[j])))
+    overlap_issues = _check_bbox_overlaps(pdf_block_bboxes, source_overlap_keys)
     issues.extend(overlap_issues)
 
     has_errors = any(i.get("severity") == "error" for i in issues)
@@ -2184,7 +2217,11 @@ def run_checks(testcase: str, registry_path: Path, output_path: Path,
     print(f"  translation_completeness_check: {tc_result['check_result'].upper()}")
 
     print("Running readability_check...")
-    rd_result = readability_check(str(translated_json_path), str(output_pdf_path))
+    _src_pdf = output_pdf_path.parent / "source.pdf"
+    rd_result = readability_check(
+        str(translated_json_path), str(output_pdf_path),
+        source_pdf_path=str(_src_pdf) if _src_pdf.exists() else None,
+    )
     summary["total"] += 1
     if rd_result["check_result"] == "pass":
         summary["passed"] += 1
@@ -2291,7 +2328,8 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str,
     rd_result = {"check_result": "skipped", "reason": "no PDF provided"}
     if pdf_path:
         print("Running readability_check...")
-        rd_result = readability_check(translated_json, pdf_path)
+        rd_result = readability_check(translated_json, pdf_path,
+                                      source_pdf_path=source_pdf if source_pdf else None)
         print(f"  readability_check: {rd_result['check_result'].upper()}")
 
     # Print coverage summary

@@ -640,6 +640,39 @@ def _find_neighbor_y1_limit(
     return best_y0 - gap
 
 
+def _find_safe_expand_x_limits(
+    block_idx: int,
+    insert_bboxes: list,
+    page_rect: "fitz.Rect",
+    gap: float = 2.0,
+) -> tuple:
+    """Find safe horizontal expansion limits for block_idx.
+
+    Returns (safe_x0, safe_x1) where expansion is constrained by neighboring
+    blocks that y-overlap with the current block.  Mirrors the logic of
+    _find_neighbor_y1_limit but for the horizontal axis.
+    """
+    cur = insert_bboxes[block_idx]
+    safe_x0 = page_rect.x0
+    safe_x1 = page_rect.x1
+
+    for j, other in enumerate(insert_bboxes):
+        if j == block_idx:
+            continue
+        # Check y-overlap with current block
+        y_overlap = min(cur.y1, other.y1) - max(cur.y0, other.y0)
+        if y_overlap <= 0:
+            continue
+        # Block is entirely to the LEFT → limit leftward expansion
+        if other.x1 <= cur.x0:
+            safe_x0 = max(safe_x0, other.x1 + gap)
+        # Block is entirely to the RIGHT → limit rightward expansion
+        elif other.x0 >= cur.x1:
+            safe_x1 = min(safe_x1, other.x0 - gap)
+
+    return safe_x0, safe_x1
+
+
 def render_page(
     page: fitz.Page,
     page_data: dict,
@@ -852,13 +885,15 @@ def render_page(
     overflow_expanded = [False] * len(fitting_sizes)  # track which blocks were expanded
     for i in range(len(fitting_sizes)):
         if fitting_sizes[i] < _READABILITY_FLOOR and translated_texts[i].strip():
+            safe_x0, safe_x1 = _find_safe_expand_x_limits(i, insert_bboxes, page_rect)
+            constrained_rect = fitz.Rect(safe_x0, page_rect.y0, safe_x1, page_rect.y1)
             expanded = visual.overflow_bbox(
                 insert_bboxes[i],
                 translated_texts[i],
                 _READABILITY_FLOOR,
                 color=(0, 0, 0),
                 align=aligns[i],
-                page_rect=page_rect,
+                page_rect=constrained_rect,
             )
             # Clamp downward expansion to avoid overlapping neighbor blocks
             neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
@@ -966,13 +1001,15 @@ def render_page(
         lines_needed = _estimate_lines_needed(translated_texts[i], rs, ibbox.width)
         height_needed = lines_needed * rs * _LINE_HEIGHT_FACTOR
         if height_needed > ibbox.height * 1.1:  # >10% overflow
+            safe_x0, safe_x1 = _find_safe_expand_x_limits(i, insert_bboxes, page_rect)
+            constrained_rect = fitz.Rect(safe_x0, page_rect.y0, safe_x1, page_rect.y1)
             expanded = visual.overflow_bbox(
                 ibbox,
                 translated_texts[i],
                 rs,
                 color=(0, 0, 0),
                 align=aligns[i],
-                page_rect=page_rect,
+                page_rect=constrained_rect,
             )
             # Clamp downward expansion to avoid overlapping neighbor blocks
             neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
