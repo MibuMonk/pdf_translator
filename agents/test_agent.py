@@ -119,6 +119,93 @@ def extract_pdf_spans_by_page(pdf_path: Path) -> dict:
     return result
 
 
+def extract_pdf_text_block_bboxes_by_page(pdf_path: Path) -> dict:
+    """
+    Return dict: page_num (1-based) -> list of bbox [x0, y0, x1, y1]
+    for each text block in the PDF.  Only includes text blocks (type 0)
+    with non-empty text and area >= 100 px².
+    """
+    doc = fitz.open(str(pdf_path))
+    result = {}
+    for page_idx in range(len(doc)):
+        page = doc[page_idx]
+        page_num = page_idx + 1
+        bboxes = []
+        blocks = page.get_text("dict")["blocks"]
+        for block in blocks:
+            if block.get("type") != 0:
+                continue
+            bbox = block.get("bbox")
+            if not bbox:
+                continue
+            x0, y0, x1, y1 = bbox
+            w = x1 - x0
+            h = y1 - y0
+            if w * h < 100:
+                continue
+            # Check block has actual text
+            has_text = False
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    if span.get("text", "").strip():
+                        has_text = True
+                        break
+                if has_text:
+                    break
+            if has_text:
+                bboxes.append(list(bbox))
+        result[page_num] = bboxes
+    doc.close()
+    return result
+
+
+def _check_bbox_overlaps(page_bboxes: dict) -> list[dict]:
+    """
+    For each page, check all pairs of text block bboxes for overlap.
+    Returns a list of bbox_overlap issues.
+    An overlap is reported when the intersection area exceeds 10% of the
+    smaller bbox's area.  Max 5 overlap issues per page.
+    """
+    issues = []
+    for page_num, bboxes in page_bboxes.items():
+        page_issues = []
+        n = len(bboxes)
+        for i in range(n):
+            if len(page_issues) >= 5:
+                break
+            ax0, ay0, ax1, ay1 = bboxes[i]
+            a_area = (ax1 - ax0) * (ay1 - ay0)
+            for j in range(i + 1, n):
+                if len(page_issues) >= 5:
+                    break
+                bx0, by0, bx1, by1 = bboxes[j]
+                b_area = (bx1 - bx0) * (by1 - by0)
+                # Intersection
+                ix0 = max(ax0, bx0)
+                iy0 = max(ay0, by0)
+                ix1 = min(ax1, bx1)
+                iy1 = min(ay1, by1)
+                if ix0 >= ix1 or iy0 >= iy1:
+                    continue
+                inter_area = (ix1 - ix0) * (iy1 - iy0)
+                min_area = min(a_area, b_area)
+                if min_area <= 0:
+                    continue
+                if inter_area > min_area * 0.10:
+                    page_issues.append({
+                        "page": page_num,
+                        "type": "bbox_overlap",
+                        "severity": "error",
+                        "bbox_a": [round(v, 1) for v in bboxes[i]],
+                        "bbox_b": [round(v, 1) for v in bboxes[j]],
+                        "intersection_area": round(inter_area, 1),
+                        "smaller_bbox_area": round(min_area, 1),
+                        "overlap_pct": round(inter_area / min_area * 100, 1),
+                    })
+        issues.extend(page_issues)
+    return issues
+
+
 def find_best_span_match(target_bbox, spans, tolerance=5.0):
     """
     Find the span whose y-center overlaps with target_bbox's y-range and whose
@@ -856,6 +943,8 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
     - multicolor_fallback: color_spans block with mismatched translated_spans char count
     - structure_collapse_suspect: single block dominating >50% page area with >200 chars
     - inconsistent_sizing: same-content pages with >30% font size difference
+    - word_split: English word broken across \\n in translated text (e.g. "Sc\\nenarios")
+    - bbox_overlap: overlapping text block bboxes in rendered PDF (intersection > 10% of smaller)
     """
     with open(translated_json_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -1051,6 +1140,59 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
                     "bbox_area_pct": round(area_pct * 100, 1),
                 })
 
+    # --- word_split: detect English words broken across \n in translated text ---
+    # When a bbox is too narrow, layout may force-break English words across lines
+    # (e.g. "Sc\nenarios", "Li\nDAR").  We detect this by checking \n boundaries
+    # in the translated text: if the characters immediately before and after \n
+    # are both ASCII letters and they form a continuous letter sequence >= 4 chars,
+    # it's likely a broken word.
+    _TRAILING_ALPHA = re.compile(r'([a-zA-Z]+)$')
+    _LEADING_ALPHA = re.compile(r'^([a-zA-Z]+)')
+    word_split_per_page: dict[int, int] = defaultdict(int)
+    WORD_SPLIT_PAGE_LIMIT = 5
+
+    for page_entry in pages:
+        if not isinstance(page_entry, dict):
+            continue
+        page_num = page_entry.get("page", page_entry.get("page_num", 0))
+        for idx, block in enumerate(page_entry.get("blocks", [])):
+            if not isinstance(block, dict):
+                continue
+            translated = block.get("translated") or ""
+            if "\n" not in translated:
+                continue
+            block_id = block.get("block_id", block.get("id", f"p{page_num:02d}_b{idx:03d}"))
+            lines = translated.split("\n")
+            for li in range(len(lines) - 1):
+                if word_split_per_page[page_num] >= WORD_SPLIT_PAGE_LIMIT:
+                    break
+                prev_line = lines[li]
+                next_line = lines[li + 1]
+                m_tail = _TRAILING_ALPHA.search(prev_line)
+                m_head = _LEADING_ALPHA.match(next_line)
+                if not m_tail or not m_head:
+                    continue
+                tail_frag = m_tail.group(1)
+                head_frag = m_head.group(1)
+                combined = tail_frag + head_frag
+                if len(combined) < 4:
+                    continue
+                # Heuristic: if tail fragment is a very short piece (1-2 chars)
+                # it's almost certainly a broken word, not a standalone word.
+                # For longer tail fragments (>=3), require that at least one
+                # fragment is short (<=2) — otherwise both could be real words.
+                if len(tail_frag) >= 3 and len(head_frag) >= 3:
+                    continue
+                issues.append({
+                    "page": page_num,
+                    "block_id": block_id,
+                    "type": "word_split",
+                    "severity": "warning",
+                    "broken_word": combined,
+                    "split_at": f"...{tail_frag}\\n{head_frag}...",
+                })
+                word_split_per_page[page_num] += 1
+
     # --- inconsistent_sizing: pages with similar first-block text but different font_size ---
     for i in range(len(page_first_blocks)):
         for j in range(i + 1, len(page_first_blocks)):
@@ -1072,6 +1214,11 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
                             "size_diff_pct": round(size_diff * 100, 1),
                         })
 
+    # --- bbox_overlap: detect overlapping text blocks in rendered PDF ---
+    pdf_block_bboxes = extract_pdf_text_block_bboxes_by_page(Path(pdf_path))
+    overlap_issues = _check_bbox_overlaps(pdf_block_bboxes)
+    issues.extend(overlap_issues)
+
     has_errors = any(i.get("severity") == "error" for i in issues)
     has_structural_warnings = any(
         i.get("type") in ("multicolor_fallback", "structure_collapse_suspect")
@@ -1086,7 +1233,105 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
             "inconsistent_sizing_count": sum(1 for i in issues if i["type"] == "inconsistent_sizing"),
             "multicolor_fallback_count": sum(1 for i in issues if i["type"] == "multicolor_fallback"),
             "structure_collapse_suspect_count": sum(1 for i in issues if i["type"] == "structure_collapse_suspect"),
+            "word_split_count": sum(1 for i in issues if i["type"] == "word_split"),
+            "bbox_overlap_count": sum(1 for i in issues if i["type"] == "bbox_overlap"),
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# fragmentation_check — detect heading/bullet split across blocks
+# ---------------------------------------------------------------------------
+
+def fragmentation_check(translated_data) -> dict:
+    """
+    Detect paragraph fragmentation: ■ heading in one block and • bullets in the
+    next block (same column, small y gap).  Also detects consecutive bullet blocks
+    that were split apart.
+    """
+    if isinstance(translated_data, str):
+        with open(translated_data, encoding="utf-8") as f:
+            translated_data = json.load(f)
+
+    if isinstance(translated_data, list):
+        pages = translated_data
+    elif isinstance(translated_data, dict):
+        pages = translated_data.get("pages", [translated_data])
+    else:
+        return {"check_result": "pass", "details": {"issues": []}}
+
+    issues: list[dict] = []
+
+    for page_entry in pages:
+        if not isinstance(page_entry, dict):
+            continue
+        page_num = page_entry.get("page", page_entry.get("page_num", 0))
+        blocks = page_entry.get("blocks", [])
+
+        # Sort blocks by y0 (top of bbox)
+        sorted_blocks = []
+        for idx, blk in enumerate(blocks):
+            if not isinstance(blk, dict):
+                continue
+            bbox = blk.get("bbox")
+            translated = blk.get("translated") or ""
+            if not bbox or len(bbox) < 4 or not translated.strip():
+                continue
+            sorted_blocks.append({
+                "block": blk,
+                "translated": translated,
+                "bbox": bbox,
+                "block_id": blk.get("block_id", blk.get("id", f"p{page_num:02d}_b{idx:03d}")),
+            })
+        sorted_blocks.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+        for i in range(len(sorted_blocks) - 1):
+            a = sorted_blocks[i]
+            b = sorted_blocks[i + 1]
+            a_text = a["translated"]
+            b_text = b["translated"]
+            a_x0 = a["bbox"][0]
+            b_x0 = b["bbox"][0]
+            a_y1 = a["bbox"][3]
+            b_y0 = b["bbox"][1]
+
+            same_column = abs(a_x0 - b_x0) < 30
+
+            # Rule 1: ■ heading alone + next block starts with •
+            if (a_text.lstrip().startswith("■")
+                    and "•" not in a_text
+                    and b_text.lstrip().startswith("•")
+                    and same_column):
+                issues.append({
+                    "type": "section_fragmentation",
+                    "severity": "warning",
+                    "page": page_num,
+                    "block_ids": [a["block_id"], b["block_id"]],
+                    "text_preview": a_text[:40],
+                })
+
+            # Rule 2: block A ends with • line, block B starts with • (split bullets)
+            if (a_text.rstrip().endswith("•") or a_text.rstrip().split("\n")[-1].lstrip().startswith("•")):
+                if b_text.lstrip().startswith("•") and same_column:
+                    y_gap = b_y0 - a_y1
+                    if y_gap < 30:
+                        # Avoid duplicate if already reported by Rule 1
+                        already = any(
+                            iss["block_ids"] == [a["block_id"], b["block_id"]]
+                            for iss in issues
+                        )
+                        if not already:
+                            issues.append({
+                                "type": "section_fragmentation",
+                                "severity": "warning",
+                                "page": page_num,
+                                "block_ids": [a["block_id"], b["block_id"]],
+                                "text_preview": a_text[:40],
+                            })
+
+    return {
+        "check_result": "fail" if issues else "pass",
+        "details": {"issues": issues},
     }
 
 

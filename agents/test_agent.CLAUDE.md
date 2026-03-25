@@ -26,6 +26,8 @@ QA 检查，输出 test_report.json。
    - `inconsistent_sizing`：两页 block[0] 文本相似度 > 80% 但 font_size 差异 > 30%，severity=warning
    - `multicolor_fallback`：block 有 color_spans（≥2色）但 translated_spans 字符数 ≠ translated 字符数（颜色降级信号），severity=warning
    - `structure_collapse_suspect`：单 block 字符数 >200、占页面文本面积 >50%、含 ≥3 个换行（结构坍塌信号），severity=warning
+   - `word_split`：检测英文单词被 \n 切断（如 "Sc\nenarios"），severity=warning
+   - `bbox_overlap`：从 PDF 提取实际渲染文字块 bbox，检测同页内重叠（交集面积 > 较小者 10%），severity=error
 6. **regression_check**：与 baseline 对比的回归检测
 7. **page_confidence** (post-processing)：per-page confidence scoring based on all check findings
 
