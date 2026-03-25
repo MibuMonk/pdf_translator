@@ -146,9 +146,42 @@ def _needs_translation(text: str) -> bool:
     # Contains at least some lowercase letters → has real words to translate
     if re.search(r'[a-z]', stripped):
         return True
+    # CJK characters → has text to translate
+    if re.search(r'[\u3040-\u9fff\uac00-\ud7af]', stripped):
+        return True
     # All-uppercase but long with spaces → likely a title/phrase, not just "KPI"
     if len(stripped) > 10 and ' ' in stripped:
         return True
+    return False
+
+
+def _is_target_language(text: str, tgt: str) -> bool:
+    """Check if text already appears to be predominantly in the target language.
+
+    When translating ja→en, English text in Japanese slides is already in the
+    target language. The LLM correctly returns it unchanged, so we should not
+    flag it as "untranslated" or trigger retries.
+    """
+    # Strip span tags and punctuation/symbols for analysis
+    clean = re.sub(r'</?s\d+>', '', text)
+    clean = re.sub(r'[^\w\s]', '', clean, flags=re.UNICODE)
+    clean = clean.strip()
+    if not clean:
+        return False
+
+    if tgt == 'en':
+        # Predominantly Latin letters
+        latin = len(re.findall(r'[a-zA-Z]', clean))
+        total = len(re.findall(r'\S', clean))
+        return total > 0 and latin / total > 0.5
+    elif tgt == 'ja':
+        # Has Hiragana or Katakana (unique to Japanese)
+        return bool(re.search(r'[\u3040-\u30ff]', clean))
+    elif tgt.startswith('zh'):
+        # Has CJK ideographs but no Japanese kana
+        has_cjk = bool(re.search(r'[\u4e00-\u9fff]', clean))
+        has_kana = bool(re.search(r'[\u3040-\u30ff]', clean))
+        return has_cjk and not has_kana
     return False
 
 
@@ -417,7 +450,7 @@ def translate_texts(
         if text in cache:
             cached = cache[text]
             # Reject poisoned cache: source == translation for translatable text
-            if cached == text and _needs_translation(text):
+            if cached == text and _needs_translation(text) and not _is_target_language(text, tgt):
                 to_translate.append((i, text))
             else:
                 results[i] = cached
@@ -451,7 +484,7 @@ def translate_texts(
     # Retry: detect blocks where LLM returned source text unchanged
     unchanged = []
     for i, text in enumerate(texts):
-        if results[i] is not None and results[i] == text and _needs_translation(text):
+        if results[i] is not None and results[i] == text and _needs_translation(text) and not _is_target_language(text, tgt):
             unchanged.append((i, text))
 
     if unchanged:
@@ -475,7 +508,7 @@ def translate_texts(
         # Report remaining unchanged after retry
         still_unchanged = sum(
             1 for i, text in enumerate(texts)
-            if results[i] is not None and results[i] == text and _needs_translation(text)
+            if results[i] is not None and results[i] == text and _needs_translation(text) and not _is_target_language(text, tgt)
         )
         if still_unchanged:
             print(
