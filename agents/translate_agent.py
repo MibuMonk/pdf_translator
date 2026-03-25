@@ -559,8 +559,18 @@ def main():
                 translated_spans = _parse_tagged_translation(raw_translation, cs)
                 if translated_spans:
                     block["translated_spans"] = translated_spans
-                    # Also set `translated` for compatibility (concatenate span texts)
-                    block["translated"] = "".join(s["text"] for s in translated_spans)
+                    # Reconstruct `translated` preserving semantic newlines between spans.
+                    # The original text may contain \n before bullet markers (e.g. "\n• VVP ...")
+                    # but spans themselves don't carry inter-span separators.  We recover them
+                    # by checking if the *original* span text starts with a bullet marker.
+                    parts = []
+                    for si, sp in enumerate(translated_spans):
+                        if si > 0 and si < len(cs):
+                            orig_span_text = cs[si].get("text", "")
+                            if _BULLET_RE.match(orig_span_text):
+                                parts.append("\n")
+                        parts.append(sp["text"])
+                    block["translated"] = "".join(parts)
                 else:
                     # Fallback: strip any leftover tags and use as plain translation
                     plain_text = re.sub(r'</?s\d+>', '', raw_translation)
