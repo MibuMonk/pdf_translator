@@ -1,0 +1,255 @@
+# PDF Translator
+
+Translates PDF slide decks between languages while preserving layout.
+Powered by Claude AI (Anthropic SDK) and PyMuPDF.
+
+**Supported directions:** Japanese → Chinese, English → Japanese, and more.
+
+---
+
+## Prerequisites
+
+| Requirement | Version |
+|-------------|---------|
+| Python | 3.9+ |
+| PyMuPDF | ≥ 1.23.0 |
+| anthropic SDK | ≥ 0.20.0 |
+| Anthropic API key | Required (see below) |
+
+---
+
+## Installation
+
+```bash
+git clone <repo-url>
+cd pdf_translator
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Set your API key:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Optional environment variables:
+
+```bash
+export ANTHROPIC_BASE_URL=...       # custom endpoint (e.g. internal proxy)
+export ANTHROPIC_AUTH_TOKEN=...     # bearer token auth (alternative to API key)
+export ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6  # override model
+```
+
+---
+
+## Quick Start
+
+```bash
+# Translate a PDF to Japanese
+python3 run_pipeline.py input.pdf --tgt ja
+
+# Translate specific pages only
+python3 run_pipeline.py input.pdf --tgt ja --pages 1,3,5-8
+
+# Specify output path
+python3 run_pipeline.py input.pdf --tgt ja --output output.pdf
+```
+
+Output files land next to the source PDF:
+- `input.ja.pdf` — translated PDF
+- `input.ja.parsed.json` — intermediate parse result
+- `input.ja.translated.json` — translated text + metadata
+- `input.ja.layout_plan.json` — layout planning result
+- `input.ja.test_report.json` — QA report
+
+---
+
+## Pipeline
+
+```
+source.pdf
+    │
+    ▼
+parse_agent         → parsed.json         (extract text blocks + metadata)
+    │
+    ▼
+consolidator        → parsed.json         (merge fragmented blocks)
+    │
+    ├─────────────────────────────────────┐
+    ▼                                     ▼
+translate_agent     → translated.json    space_planner  → layout_plan.json
+(LLM, parallel)                          (geometry-only, parallel)
+    │                                     │
+    └──────────────┬──────────────────────┘
+                   ▼
+             layout_agent     → output.pdf    (render translated text)
+                   │
+                   ▼
+             test_agent        → test_report.json  (QA checks)
+```
+
+`translate_agent` and `space_planner` run in parallel; all other steps are sequential.
+
+---
+
+## Running Tests
+
+### Pipeline QA mode (after `run_pipeline.py`)
+
+```bash
+python3 agents/test_agent.py \
+  --json path/to/translated.json \
+  --pdf  path/to/output.pdf \
+  --output test_report.json
+```
+
+### Testcase regression mode
+
+Requires `testdata/<name>/source.pdf` and `testdata/<name>/output.pdf`:
+
+```bash
+python3 agents/test_agent.py --testcase 成果物4
+```
+
+### Save baseline for regression tracking
+
+```bash
+python3 agents/test_agent.py --testcase 成果物4 --save-baseline
+```
+
+### Visual QA with Claude Vision (optional)
+
+Runs Claude Vision on low-confidence pages. Requires `ANTHROPIC_API_KEY`:
+
+```bash
+python3 agents/test_agent.py --testcase 成果物4
+# Visual review runs automatically on LOW confidence pages.
+# Skip with: --no-visual
+```
+
+---
+
+## Verify Script
+
+`scripts/verify.sh` re-runs the pipeline and exports problem pages as PNG for quick review:
+
+```bash
+# Full run
+scripts/verify.sh 成果物4
+
+# Specific pages only
+scripts/verify.sh 成果物4 16-21
+
+# Open output PDF after run
+scripts/verify.sh 成果物4 16-21 --open
+```
+
+---
+
+## Project Structure
+
+```
+pdf_translator/
+├── run_pipeline.py          # Entry point — orchestrates all agents
+├── requirements.txt
+├── CLAUDE.md                # Claude Code project instructions (auto-loaded)
+│
+├── agents/
+│   ├── parse_agent.py       # Extract text blocks from PDF
+│   ├── consolidator.py      # Merge fragmented text blocks
+│   ├── translate_agent.py   # LLM translation (Anthropic SDK)
+│   ├── space_planner.py     # Geometry / layout planning
+│   ├── layout_agent.py      # Render translated text into PDF
+│   ├── test_agent.py        # QA checks + visual review
+│   ├── visual_agent.py      # Font fitting helper (used by layout_agent)
+│   ├── topology_agent.py    # Container/column detection helper
+│   ├── shared_utils.py      # Shared utilities (has_cjk, cluster, …)
+│   └── *.CLAUDE.md          # Per-agent instructions for Claude Code
+│
+├── contracts/
+│   ├── *.schema.json        # JSON Schema for each pipeline artifact
+│   └── validate.py          # Schema validator
+│
+├── docs/
+│   ├── defect_taxonomy.md   # Defect classification (L1-L6, T1-T3)
+│   └── development.md       # Development log
+│
+├── scripts/
+│   └── verify.sh            # Quick pipeline + visual check helper
+│
+└── testdata/                # gitignored — put source PDFs here
+    └── <testcase>/
+        ├── source.pdf
+        ├── output.pdf       # generated by pipeline
+        └── baseline/        # committed regression baseline (optional)
+```
+
+---
+
+## Working with Claude Code
+
+This project is designed to be developed with [Claude Code](https://claude.ai/code) (the official Claude CLI).
+
+**Setup:**
+
+```bash
+# Install Claude Code
+curl -fsSL https://claude.ai/install.sh | bash
+
+# Open Claude Code in this project
+cd pdf_translator
+claude
+```
+
+**How it works with this project:**
+
+- `CLAUDE.md` at the project root is automatically loaded by Claude Code at the start of every session. It defines the pipeline architecture, I/O contracts, and agent roles.
+- Each `agents/*.CLAUDE.md` file documents the corresponding agent's behavior, known issues, and lessons learned. These are fed to Claude when working on that agent.
+- The `~/.claude/projects/.../memory/` directory persists cross-session learnings automatically.
+
+**Key conventions:**
+
+- The main thread (Claude) coordinates and converses — it never implements directly.
+- All implementation goes to agents spawned by Claude Code.
+- `CLAUDE.md` is the source of truth for architecture decisions. Update it when contracts change.
+
+---
+
+## Configuration
+
+### Supported target languages (`--tgt`)
+
+| Code | Language |
+|------|----------|
+| `ja` | Japanese |
+| `zh` | Chinese (Simplified) |
+| `en` | English |
+
+### QA check overview
+
+| Check | Method | Notes |
+|-------|--------|-------|
+| coverage_check | rule-based | Translation coverage rate |
+| translation_completeness_check | rule-based | Untranslated content detection |
+| readability_check | rule-based + PDF | Font size, truncation, overlap, word splits |
+| style_check | LLM | Language style consistency |
+| quality_check | LLM | Translation quality |
+| regression_check | diff vs baseline | Block count, visual diff, title preservation |
+| visual_review_check | Claude Vision | Per-page visual comparison (LOW confidence pages) |
+
+---
+
+## Known Limitations
+
+- **bbox_overlap false positives**: Source PDFs with MuPDF xref errors (watermarks in vector layer) produce ~100 spurious overlap errors. These are source PDF artifacts, not pipeline bugs.
+- **Paragraph spacing**: Translated text is rendered into original bbox coordinates. When translation is shorter than source, vertical gaps may appear. Full reflow is not yet implemented.
+- **Text too small**: Small bboxes with source-language constraints may result in font sizes near the 8pt readability floor when translated text is longer.
+- **Vector layer content**: Text embedded in PDF drawing layers (not extractable by parse_agent) is not translated.
+
+---
+
+## License
+
+Internal use only.
