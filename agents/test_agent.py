@@ -1764,7 +1764,8 @@ def _render_page_to_png(pdf_path: str, page_num_0based: int, dpi: int = 300) -> 
 
 
 def visual_review_check(source_pdf: str, output_pdf: str,
-                        review_pages: list[int] = None) -> dict:
+                        review_pages: list[int] = None,
+                        on_page_result=None) -> dict:
     """
     Visual review check using Claude Vision.
     Compares source and output PDF page screenshots to detect layout anomalies.
@@ -1774,6 +1775,10 @@ def visual_review_check(source_pdf: str, output_pdf: str,
         output_pdf: Path to the translated output PDF.
         review_pages: List of 1-based page numbers to review.
                       If None, reviews all pages (capped at _VISUAL_REVIEW_MAX_PAGES).
+        on_page_result: Optional callable(page_num, grade, page_issues) called
+                        immediately after each page is graded, before moving to
+                        the next page. page_issues is a list of issue dicts
+                        (may be empty for grades A/B).
 
     Returns:
         A check result dict compatible with the issue_results framework.
@@ -1866,11 +1871,14 @@ def visual_review_check(source_pdf: str, output_pdf: str,
                 severity = "warning"
             else:
                 # Grade A or B: no issues to report
+                if on_page_result is not None:
+                    on_page_result(page_num, grade, [])
                 continue
 
+            page_issues = []
             for defect in defects:
                 code = defect.get("code", "unknown").upper()
-                all_issues.append({
+                page_issues.append({
                     "page": page_num,
                     "type": f"visual_review_{code.lower()}",
                     "severity": severity,
@@ -1878,6 +1886,10 @@ def visual_review_check(source_pdf: str, output_pdf: str,
                     "location": defect.get("location", ""),
                     "grade": grade,
                 })
+            all_issues.extend(page_issues)
+
+            if on_page_result is not None:
+                on_page_result(page_num, grade, page_issues)
 
         except json.JSONDecodeError as e:
             print(f"  [visual_review] Page {page_num}: Failed to parse response: {e}",
@@ -2411,7 +2423,27 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str,
 
         if review_pages is None or len(review_pages) > 0:
             print("Running visual_review_check...")
-            vr_result = visual_review_check(source_pdf, pdf_path, review_pages)
+            work_dir = Path(output).parent
+
+            def _on_page_result(page_num, grade, page_issues):
+                if page_issues:
+                    summary = "; ".join(
+                        i.get("description", "") or i.get("type", "")
+                        for i in page_issues
+                    )
+                else:
+                    summary = "no issues"
+                print(f"  [visual_review] Page {page_num}: {grade} — {summary}")
+                if grade in ("C", "D", "F"):
+                    per_page_path = work_dir / f"visual_review_p{page_num:02d}.json"
+                    with open(per_page_path, "w", encoding="utf-8") as _f:
+                        json.dump(
+                            {"page": page_num, "grade": grade, "issues": page_issues},
+                            _f, ensure_ascii=False, indent=2,
+                        )
+
+            vr_result = visual_review_check(source_pdf, pdf_path, review_pages,
+                                            on_page_result=_on_page_result)
             print(f"  visual_review_check: {vr_result['check_result'].upper()}")
             report["issue_results"]["visual_review_check"] = vr_result
 
