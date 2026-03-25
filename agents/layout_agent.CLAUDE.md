@@ -93,6 +93,19 @@
 - 已修复：扩展前检测下方最近邻居，y1 上限为 neighbor.y0 - 2pt
   受限后放不下则缩小字号，不无限扩展
 
+### overflow_bbox 横向扩展侵入相邻列（L6 bbox 重叠）
+- visual_agent.overflow_bbox() 横向扩展只受 page_rect 限制，不感知 y 轴重叠的邻居 block
+  多列布局（如表格、分栏）中可能扩入相邻列
+- 已修复：Step 9b/10b 调用 overflow_bbox 前先调 `_find_safe_expand_x_limits()`
+  生成受邻居约束的 constrained_rect 传入 overflow_bbox
+
+### preprocess() 消费显式 \n（折行位置错误）
+- `_EN_CJK_RE` / `_CJK_EN_RE` 用 `\s+` 匹配 ASCII/CJK 边界并插入 `\xa0`
+  `\s+` 包含 `\n`，所以 `"UNP CUTIN\n衝突"` 中的 `\n` 被替换为 `\xa0`，显式折行丢失
+  layout_agent 在窄 bbox 中随机折行（如 "UNP\nCUTIN"），而不是在指定位置
+- 已修复：将 `\s+` 改为 `[ \t]+`，只匹配空格/tab，不跨 `\n`
+- **注意**：test_agent 无法自动检测此类折行位置错误，需 visual_review 或人工确认
+
 ## I/O
 
 - 输入：源 PDF + translated.json + layout_plan.json

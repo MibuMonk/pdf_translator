@@ -103,8 +103,8 @@ _SPECIAL_REPL = [
 ]
 
 _BULLET_RE  = re.compile(r"([\u2022\u25cf\u25cb\u25a0\u25a1\u2023\u25e6\u2043•])\s+")
-_EN_CJK_RE  = re.compile(r"([A-Za-z0-9])\s+([\u3000-\u9fff\uac00-\ud7af])")
-_CJK_EN_RE  = re.compile(r"([\u3000-\u9fff\uac00-\ud7af])\s+([A-Za-z0-9])")
+_EN_CJK_RE  = re.compile(r"([A-Za-z0-9])[ \t]+([\u3000-\u9fff\uac00-\ud7af])")
+_CJK_EN_RE  = re.compile(r"([\u3000-\u9fff\uac00-\ud7af])[ \t]+([A-Za-z0-9])")
 
 
 def preprocess(text: str) -> str:

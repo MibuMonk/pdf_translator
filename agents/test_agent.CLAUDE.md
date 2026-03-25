@@ -95,7 +95,17 @@ python test_agent.py --testcase 成果物4 --save-baseline
 
 ## 已知问题
 
-(none currently tracked)
+### bbox_overlap 水印误报（source PDF xref 损坏时 baseline 过滤失效）
+- readability_check 新增 source_pdf_path 参数，用于从 source PDF 提取基准 overlap 并过滤
+- 但 source PDF 含 MuPDF xref 错误（`cannot find object in xref (N 0 R)`）时，
+  水印等图形对象无法被 PyMuPDF 读取，baseline 提取为空，过滤失效
+- 后果：output PDF 中水印与文字的重叠仍被误报为 error（100 个左右）
+- 当前无自动解决方案；xref 损坏是 source PDF 的固有问题
+
+### preprocess() \n 折行位置无测试覆盖
+- layout_agent 的 preprocess() 修复了 `\s+` 吃掉显式 `\n` 的 bug
+- test_agent 无专项检测：word_split 检测的是英文单词断行，不检测折行"位置是否合理"
+- 只能通过 visual_review_check（Claude Vision 对比）或人工确认
 
 ## Lessons Learned
 
