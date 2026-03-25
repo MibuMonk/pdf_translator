@@ -1740,7 +1740,7 @@ def _extract_page_findings(issue_results: dict) -> list[dict]:
                 if "page" in iss and "severity" in iss:
                     findings.append({"page": iss["page"], "severity": iss["severity"]})
 
-        elif check_name in ("linebreak_consistency_check", "mixed_language_check"):
+        elif check_name in ("linebreak_consistency_check", "mixed_language_check", "fragmentation_check"):
             if isinstance(details, dict):
                 for iss in details.get("issues", []):
                     if "page" in iss and "severity" in iss:
@@ -2099,6 +2099,10 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str, thumbs: st
     term_result = terminology_consistency_check(translated_json)
     print(f"  terminology_consistency_check: {term_result['check_result'].upper()}")
 
+    print("Running fragmentation_check...")
+    frag_result = fragmentation_check(translated_json)
+    print(f"  fragmentation_check: {frag_result['check_result'].upper()}")
+
     rd_result = {"check_result": "skipped", "reason": "no PDF provided"}
     if pdf_path:
         print("Running readability_check...")
@@ -2123,7 +2127,7 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str, thumbs: st
         print(bold("\nRendering thumbnails..."))
         render_thumbnails(pdf_path, thumbs)
 
-    all_checks = [cov_result, qual_result, style_result, tc_result, lb_result, ml_result, term_result, rd_result]
+    all_checks = [cov_result, qual_result, style_result, tc_result, lb_result, ml_result, term_result, frag_result, rd_result]
     passed = all(r["check_result"] in ("pass", "skipped") for r in all_checks)
 
     report = {
@@ -2145,6 +2149,7 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str, thumbs: st
             "linebreak_consistency_check": lb_result,
             "mixed_language_check": ml_result,
             "terminology_consistency_check": term_result,
+            "fragmentation_check": frag_result,
             "readability_check": rd_result,
         },
     }
