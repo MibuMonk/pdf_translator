@@ -25,6 +25,93 @@ SUPPORTED_LANGUAGES = {
 }
 
 
+def _repair_json(raw: str) -> list:
+    """Attempt to parse a JSON array from potentially malformed LLM output.
+
+    Tries progressively aggressive repairs:
+    1. Direct json.loads
+    2. Extract outermost [...] substring
+    3. Fix trailing commas before ] or }
+    4. Fix single quotes → double quotes (structural only)
+    5. Regex-based object extraction as last resort
+
+    Returns parsed list on success, raises ValueError on complete failure.
+    """
+    # 1. Direct parse
+    try:
+        result = json.loads(raw)
+        if isinstance(result, list):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 2. Extract outermost [...] — handles LLM adding explanation around JSON
+    bracket_match = re.search(r'\[', raw)
+    if bracket_match:
+        start = bracket_match.start()
+        # Find matching closing bracket
+        depth = 0
+        end = None
+        for i in range(start, len(raw)):
+            if raw[i] == '[':
+                depth += 1
+            elif raw[i] == ']':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end is not None:
+            extracted = raw[start:end]
+            try:
+                result = json.loads(extracted)
+                if isinstance(result, list):
+                    print("    [json-repair] extracted JSON array from surrounding text", flush=True)
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            # 3. Fix trailing commas: ,] or ,}
+            fixed = re.sub(r',\s*([}\]])', r'\1', extracted)
+            try:
+                result = json.loads(fixed)
+                if isinstance(result, list):
+                    print("    [json-repair] fixed trailing commas", flush=True)
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            # 4. Fix single quotes → double quotes (structural)
+            # Replace single-quoted keys/values but avoid mangling apostrophes inside strings
+            sq_fixed = fixed.replace("'", '"')
+            try:
+                result = json.loads(sq_fixed)
+                if isinstance(result, list):
+                    print("    [json-repair] fixed single quotes to double quotes", flush=True)
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    # 5. Regex-based extraction: find all {"id": N, "text": "..."} objects
+    obj_pattern = re.compile(
+        r'\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*("(?:[^"\\]|\\.)*?")\s*\}',
+        re.DOTALL,
+    )
+    matches = obj_pattern.findall(raw)
+    if matches:
+        items = []
+        for id_str, text_json in matches:
+            try:
+                text_val = json.loads(text_json)
+                items.append({"id": int(id_str), "text": text_val})
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if items:
+            print(f"    [json-repair] reconstructed {len(items)} items via regex extraction", flush=True)
+            return items
+
+    raise ValueError(f"_repair_json: unable to parse JSON from LLM output ({len(raw)} chars)")
+
+
 def _make_client() -> "anthropic.Anthropic":
     import anthropic as _anthropic
     auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
@@ -230,7 +317,7 @@ def _call_claude_translate(
         # Strip markdown fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        parsed = json.loads(raw)
+        parsed = _repair_json(raw)
         return {item["id"]: _restore_newlines(item["text"]) for item in parsed}
 
     except Exception as exc:
@@ -294,7 +381,7 @@ def _call_claude_retry_translate(
         raw = message.content[0].text.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        parsed = json.loads(raw)
+        parsed = _repair_json(raw)
         return {item["id"]: _restore_newlines(item["text"]) for item in parsed}
     except (json.JSONDecodeError, KeyError, Exception) as exc:
         print(f"    [retry parse error] {exc} — keeping originals.", flush=True)
