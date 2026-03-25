@@ -25,12 +25,38 @@ SUPPORTED_LANGUAGES = {
 }
 
 
+def _fix_unescaped_newlines(s: str) -> str:
+    """Replace literal newlines inside JSON string values with \\n."""
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            result.append(ch)
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if ch == '\n' and in_string:
+            result.append('\\n')
+            continue
+        result.append(ch)
+    return ''.join(result)
+
+
 def _repair_json(raw: str) -> list:
     """Attempt to parse a JSON array from potentially malformed LLM output.
 
     Tries progressively aggressive repairs:
     1. Direct json.loads
     2. Extract outermost [...] substring
+    2b. Fix unescaped newlines inside JSON strings
     3. Fix trailing commas before ] or }
     4. Fix single quotes → double quotes (structural only)
     5. Regex-based object extraction as last resort
@@ -70,8 +96,18 @@ def _repair_json(raw: str) -> list:
             except (json.JSONDecodeError, ValueError):
                 pass
 
+            # 2b. Fix unescaped newlines inside JSON strings
+            nl_fixed = _fix_unescaped_newlines(extracted)
+            try:
+                result = json.loads(nl_fixed)
+                if isinstance(result, list):
+                    print("    [json-repair] fixed unescaped newlines", flush=True)
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
             # 3. Fix trailing commas: ,] or ,}
-            fixed = re.sub(r',\s*([}\]])', r'\1', extracted)
+            fixed = re.sub(r',\s*([}\]])', r'\1', nl_fixed)
             try:
                 result = json.loads(fixed)
                 if isinstance(result, list):
@@ -93,7 +129,7 @@ def _repair_json(raw: str) -> list:
 
     # 5. Regex-based extraction: find all {"id": N, "text": "..."} objects
     obj_pattern = re.compile(
-        r'\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*("(?:[^"\\]|\\.)*?")\s*\}',
+        r'\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*("(?:[^"\\]|\\.|\n)*?")\s*\}',
         re.DOTALL,
     )
     matches = obj_pattern.findall(raw)
@@ -101,7 +137,9 @@ def _repair_json(raw: str) -> list:
         items = []
         for id_str, text_json in matches:
             try:
-                text_val = json.loads(text_json)
+                # Escape literal newlines before JSON parsing
+                text_json_fixed = text_json.replace('\n', '\\n')
+                text_val = json.loads(text_json_fixed)
                 items.append({"id": int(id_str), "text": text_val})
             except (json.JSONDecodeError, ValueError):
                 continue
@@ -339,6 +377,7 @@ def _call_claude_translate(
         f"{input_json}"
     )
 
+    _last_raw = None  # capture raw output for single-item fallback
     try:
         client = _make_client()
         message = client.messages.create(
@@ -346,9 +385,9 @@ def _call_claude_translate(
             max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = message.content[0].text.strip()
+        _last_raw = message.content[0].text.strip()
         # Strip markdown fences if present
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"^```(?:json)?\s*", "", _last_raw)
         raw = re.sub(r"\s*```$", "", raw)
         parsed = _repair_json(raw)
         return {item["id"]: _restore_newlines(item["text"]) for item in parsed}
@@ -374,6 +413,26 @@ def _call_claude_translate(
                 combined[k + mid] = v
             return combined
         else:
+            # For single-item batch, try using raw LLM output as translation
+            if len(batch) == 1 and _last_raw:
+                try:
+                    raw_text = _last_raw
+                    # Strip markdown fences
+                    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                    raw_text = re.sub(r"\s*```$", "", raw_text)
+                    # Strip any JSON wrapper artifacts
+                    raw_text = re.sub(r'^\s*\[\s*\{\s*"id"\s*:\s*\d+\s*,\s*"text"\s*:\s*"?', '', raw_text)
+                    raw_text = re.sub(r'"?\s*\}\s*\]\s*$', '', raw_text)
+                    raw_text = _restore_newlines(raw_text.strip())
+                    _, orig_text = batch[0]
+                    if raw_text and raw_text != orig_text:
+                        print(
+                            f"    [fallback] used raw LLM output as translation for single item",
+                            flush=True,
+                        )
+                        return {0: raw_text}
+                except Exception:
+                    pass
             print(
                 f"    [error] batch of {len(batch)} failed at max depth ({exc}), returning originals.",
                 flush=True,
