@@ -28,19 +28,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Set your API key:
+Create a `.env` file in the project root (gitignored):
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=your-api-key-here
+ANTHROPIC_BASE_URL=https://your-proxy-or-gateway   # required if using a corporate proxy/gateway
 ```
 
-Optional environment variables:
-
-```bash
-export ANTHROPIC_BASE_URL=...       # custom endpoint (e.g. internal proxy)
-export ANTHROPIC_AUTH_TOKEN=...     # bearer token auth (alternative to API key)
-export ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6  # override model
-```
+If calling `api.anthropic.com` directly, `ANTHROPIC_BASE_URL` can be omitted.
 
 ---
 
@@ -55,6 +50,12 @@ python3 run_pipeline.py input.pdf --tgt ja --pages 1,3,5-8
 
 # Specify output path
 python3 run_pipeline.py input.pdf --tgt ja --output output.pdf
+```
+
+For faster results without QA:
+
+```bash
+python3 run_pipeline.py input.pdf --tgt ja --skip-qa
 ```
 
 Output files land next to the source PDF:

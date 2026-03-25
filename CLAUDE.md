@@ -5,11 +5,13 @@ Uses Claude CLI for translation/analysis, PyMuPDF for parsing and rendering.
 
 ## Prerequisites
 
-**API Key**: Before using the pipeline, create a `.env` file in the project root:
+**API Key & Endpoint**: Create a `.env` file in the project root:
 ```
 ANTHROPIC_API_KEY=your-api-key-here
+ANTHROPIC_BASE_URL=https://your-proxy-or-gateway   # required if using a corporate proxy/gateway
 ```
 The pipeline loads this automatically via `python-dotenv`. The `.env` file is gitignored.
+If calling `api.anthropic.com` directly, `ANTHROPIC_BASE_URL` can be omitted.
 
 ## Working Modes
 
@@ -17,8 +19,8 @@ Two skills define how to use this project. Read the user's intent and pick one.
 
 | Skill | When to use | What it does |
 |-------|-------------|--------------|
-| `/translate` | User wants a translated PDF | Run pipeline once, return result |
-| `/refine` | User reports quality issues or developer is improving the tool | Defect diagnosis, code fixes, iterative testing |
+| `/translate` | User wants a translated PDF | Fast mode: pipeline with `--skip-qa`, no test_agent/visual review |
+| `/refine` | User reports quality issues or developer is improving the tool | Heavy mode: full QA, defect diagnosis, code fixes, iterative testing |
 
 If the user's intent clearly matches a skill, invoke it directly without asking.
 
@@ -130,4 +132,4 @@ Work files and intermediate outputs are gitignored (regenerable). Only `baseline
 |------|-------|-----------|-------|
 | 成果物1 | ~68 | ja→zh | Primary test case. Also has work_ja/ (zh→ja reverse) |
 | 成果物3 | 88 | en→ja | Legacy work files (old naming: parsed.json) |
-| 成果物4 | 8 | ja→zh | Has regression baseline/ (committed) |
+| 成果物4 | 8 | en→* | Has regression baseline/ (committed) |

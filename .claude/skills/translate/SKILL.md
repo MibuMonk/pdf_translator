@@ -21,8 +21,10 @@ Run the translation pipeline and return the result. Do not iterate or dig into i
 
 3. Run the pipeline:
    ```bash
-   python3 run_pipeline.py <input.pdf> --tgt <lang> --src <lang> [options]
+   python3 run_pipeline.py <input.pdf> --tgt <lang> --src <lang> --skip-qa [options]
    ```
+
+   > `/translate` always uses `--skip-qa` for speed. For full QA, use `/refine`.
 
 4. Return the output PDF path to the user. Output is at `{stem}.{tgt}.pdf` next to the input file.
 
