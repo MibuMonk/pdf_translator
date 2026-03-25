@@ -1243,7 +1243,9 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
                     # num→unit: "8,000" / "km"
                     elif _NUM_TAIL.search(line_a) and _UNIT_HEAD.match(line_b):
                         head_word = _UNIT_HEAD.match(line_b).group(0)
-                        if len(head_word) <= 5:
+                        # Skip all-caps words — those are acronyms (e.g. "DDLD", "CCB"),
+                        # not units (km, kph, GHz). Units are lower/mixed case.
+                        if len(head_word) <= 5 and not head_word.isupper():
                             issues.append({
                                 "page": page_num,
                                 "type": "number_unit_split",
@@ -2187,6 +2189,11 @@ def run_checks(testcase: str, registry_path: Path, output_path: Path,
         testcase_dir = PROJECT_ROOT / "testdata" / testcase
         output_pdf_path = testcase_dir / "output.pdf"
         translated_json_path = testcase_dir / "work" / "translated.json"
+        if not translated_json_path.exists():
+            # fallback: pipeline uses {stem}.translated.json naming
+            candidates = sorted((testcase_dir / "work").glob("*.translated.json"))
+            if candidates:
+                translated_json_path = candidates[0]
 
     if not output_pdf_path.exists():
         print(f"ERROR: output.pdf not found at {output_pdf_path}", file=sys.stderr)
