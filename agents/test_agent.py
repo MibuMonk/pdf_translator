@@ -1006,7 +1006,7 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
 
     # --- block_density_check: detect structure collapse ---
     # A single block occupying >50% of total text area on a page with >200 chars
-    # and >=3 newlines is a strong signal that L2 structure collapsed into one block.
+    # is a strong signal that L2 structure collapsed into one block.
     for page_entry in pages:
         if not isinstance(page_entry, dict):
             continue
@@ -1038,8 +1038,6 @@ def readability_check(translated_json_path: str, pdf_path: str) -> dict:
             translated = block.get("translated") or ""
             char_count = len(translated)
             if char_count <= 200:
-                continue
-            if translated.count("\n") < 3:
                 continue
             area_pct = block_areas[idx] / total_area
             if area_pct > 0.50:
