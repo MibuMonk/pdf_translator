@@ -106,6 +106,7 @@ _BULLET_RE  = re.compile(r"([\u2022\u25cf\u25cb\u25a0\u25a1\u2023\u25e6\u2043•
 _EN_CJK_RE  = re.compile(r"([A-Za-z0-9])[ \t]+([\u3000-\u9fff\uac00-\ud7af\uff01-\uff60])")
 _CJK_EN_RE  = re.compile(r"([\u3000-\u9fff\uac00-\ud7af\uff01-\uff60])[ \t]+([A-Za-z0-9])")
 _NUM_UNIT_RE = re.compile(r"(\d)[ \t]+([A-Za-z])")  # digit + ASCII unit, e.g. "8,000 km"
+_UNIT_NUM_RE = re.compile(r"([A-Za-z])[ \t]+(\d)")  # ASCII abbr + digit, e.g. "UNP 1000", "MPI 100"
 
 
 def preprocess(text: str) -> str:
@@ -121,6 +122,7 @@ def preprocess(text: str) -> str:
     text = _EN_CJK_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # ASCII→CJK/fullwidth
     text = _CJK_EN_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # CJK/fullwidth→ASCII
     text = _NUM_UNIT_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # digit→ASCII unit
+    text = _UNIT_NUM_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # ASCII abbr→digit
 
     # 4. Strip leading spaces per line
     lines = text.split("\n")
