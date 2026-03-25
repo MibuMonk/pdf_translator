@@ -103,8 +103,9 @@ _SPECIAL_REPL = [
 ]
 
 _BULLET_RE  = re.compile(r"([\u2022\u25cf\u25cb\u25a0\u25a1\u2023\u25e6\u2043•])\s+")
-_EN_CJK_RE  = re.compile(r"([A-Za-z0-9])[ \t]+([\u3000-\u9fff\uac00-\ud7af])")
-_CJK_EN_RE  = re.compile(r"([\u3000-\u9fff\uac00-\ud7af])[ \t]+([A-Za-z0-9])")
+_EN_CJK_RE  = re.compile(r"([A-Za-z0-9])[ \t]+([\u3000-\u9fff\uac00-\ud7af\uff01-\uff60])")
+_CJK_EN_RE  = re.compile(r"([\u3000-\u9fff\uac00-\ud7af\uff01-\uff60])[ \t]+([A-Za-z0-9])")
+_NUM_UNIT_RE = re.compile(r"(\d)[ \t]+([A-Za-z])")  # digit + ASCII unit, e.g. "8,000 km"
 
 
 def preprocess(text: str) -> str:
@@ -117,8 +118,9 @@ def preprocess(text: str) -> str:
     text = _BULLET_RE.sub(lambda m: m.group(1) + "\xa0", text)
 
     # 3. Non-breaking spaces around mixed CJK/ASCII boundaries to prevent mid-phrase wrap
-    text = _EN_CJK_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # ASCII→CJK
-    text = _CJK_EN_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # CJK→ASCII
+    text = _EN_CJK_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # ASCII→CJK/fullwidth
+    text = _CJK_EN_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # CJK/fullwidth→ASCII
+    text = _NUM_UNIT_RE.sub(lambda m: m.group(1) + "\xa0" + m.group(2), text)  # digit→ASCII unit
 
     # 4. Strip leading spaces per line
     lines = text.split("\n")
