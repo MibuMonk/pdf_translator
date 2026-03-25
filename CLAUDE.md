@@ -3,8 +3,44 @@
 Translates PDFs (mainly slide decks) between languages while preserving layout.
 Uses Claude CLI for translation/analysis, PyMuPDF for parsing and rendering.
 
-## Role of This Thread
+## Working Modes
 
+This project has three working modes. Read the user's intent to decide which mode you're in.
+
+### Mode 1: Quick Translate (user wants a translated PDF)
+
+User says something like "把这个PDF翻译成中文", "translate this to Japanese", etc.
+
+**Do this:**
+```bash
+python3 run_pipeline.py <input.pdf> --tgt <lang> --src <lang>
+```
+
+Common options:
+- `--pages 1,3,5-8` — only translate specific pages
+- `--skip-qa` — skip QA step for faster results
+- `--context <file>` — provide domain terminology or background knowledge
+- `--font <path>` — specify a CJK font
+
+Output goes to `{stem}.{tgt}.pdf` in the same directory as the input. Return the output path to the user when done.
+
+**Don't** dig into intermediate files, run test_agent separately, or enter any iterative loop. Just run and deliver.
+
+### Mode 2: Result Refinement (user is unhappy with output quality)
+
+User says something like "第3页排版有问题", "this block overflows", "translation of page 5 is wrong", etc.
+
+Follow the **Defect Response Protocol** below. Key points:
+1. Classify the defect first
+2. Ensure test_agent can detect it before fixing
+3. Diagnose from intermediate files (parsed.json, translated.json, layout_plan.json)
+4. Fix and verify with `scripts/verify.sh`
+
+### Mode 3: Tool Development (developer is improving the pipeline itself)
+
+Developer is working on agent code, contracts, or architecture.
+
+**Role of this thread in dev mode:**
 - Defines I/O contracts, writes requirements, delegates implementation to agents
 - Maintains CLAUDE.md
 - Does NOT directly edit agent implementation code
