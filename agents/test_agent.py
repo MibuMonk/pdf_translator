@@ -12,12 +12,11 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import math
 import os
 import re
-import shutil
-import subprocess
 import sys
 import tempfile
 from collections import defaultdict
@@ -1576,17 +1575,18 @@ def quality_check(translated_json_path: str) -> dict:
     return {"check_result": "pass", "details": []}
 
 
-def _find_claude_cli() -> str:
-    """Locate the claude CLI binary."""
-    cli = shutil.which("claude")
-    if cli:
-        return cli
-    fallback = os.path.expanduser("~/.local/bin/claude")
-    if os.path.isfile(fallback):
-        return fallback
-    raise FileNotFoundError(
-        "claude CLI not found. Install it or ensure it is on PATH."
-    )
+def _make_client():
+    import anthropic as _anthropic
+    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    if auth_token:
+        return _anthropic.Anthropic(auth_token=auth_token, base_url=base_url)
+    return _anthropic.Anthropic(api_key=api_key, base_url=base_url)
+
+
+def _get_model() -> str:
+    return os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6")
 
 
 def style_check(translated_json_path: str) -> dict:
@@ -1659,34 +1659,21 @@ def style_check(translated_json_path: str) -> dict:
     )
 
     try:
-        claude_cli = _find_claude_cli()
-        # Run from /tmp to avoid project-level hooks/CLAUDE.md polluting stdout
-        result = subprocess.run(
-            [claude_cli, "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            cwd="/tmp",
+        client = _make_client()
+        message = client.messages.create(
+            model=_get_model(),
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
         )
-        raw = result.stdout.strip()
+        raw = message.content[0].text.strip()
         # Strip markdown fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         style_result = json.loads(raw)
-    except FileNotFoundError:
-        return {
-            "check_result": "skipped",
-            "reason": "claude CLI not found",
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "check_result": "skipped",
-            "reason": "claude CLI timed out",
-        }
     except (json.JSONDecodeError, Exception) as e:
         return {
             "check_result": "fail",
-            "details": {"error": f"Failed to parse LLM response: {e}", "raw": raw[:500]},
+            "details": {"error": f"Failed to parse LLM response: {e}", "raw": locals().get('raw', '')[:500]},
         }
 
     issues = style_result.get("style_issues", [])
@@ -1758,15 +1745,6 @@ def visual_review_check(source_pdf: str, output_pdf: str,
     Returns:
         A check result dict compatible with the issue_results framework.
     """
-    # Verify claude CLI availability
-    try:
-        claude_cli = _find_claude_cli()
-    except FileNotFoundError:
-        return {
-            "check_result": "skipped",
-            "details": {"reason": "claude CLI not available"},
-        }
-
     # Verify PDFs exist
     if not source_pdf or not os.path.isfile(source_pdf):
         return {
@@ -1818,26 +1796,26 @@ def visual_review_check(source_pdf: str, output_pdf: str,
             src_png = _render_page_to_png(source_pdf, page_num - 1)
             out_png = _render_page_to_png(output_pdf, page_num - 1)
 
-            # Call Claude Vision
-            result = subprocess.run(
-                [claude_cli, "-p", _VISUAL_REVIEW_PROMPT, src_png, out_png,
-                 "--output-format", "json"],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd="/tmp",
+            # Call Claude Vision via SDK
+            with open(src_png, "rb") as f:
+                src_b64 = base64.standard_b64encode(f.read()).decode()
+            with open(out_png, "rb") as f:
+                out_b64 = base64.standard_b64encode(f.read()).decode()
+
+            client = _make_client()
+            message = client.messages.create(
+                model=_get_model(),
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": src_b64}},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": out_b64}},
+                        {"type": "text", "text": _VISUAL_REVIEW_PROMPT},
+                    ],
+                }],
             )
-
-            raw = result.stdout.strip()
-            # The --output-format json wraps the response in a JSON envelope
-            # with a "result" field containing the text response
-            try:
-                envelope = json.loads(raw)
-                if isinstance(envelope, dict) and "result" in envelope:
-                    raw = envelope["result"]
-            except json.JSONDecodeError:
-                pass
-
+            raw = message.content[0].text.strip()
             # Strip markdown fences if present
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw)
@@ -1868,10 +1846,6 @@ def visual_review_check(source_pdf: str, output_pdf: str,
                     "grade": grade,
                 })
 
-        except subprocess.TimeoutExpired:
-            print(f"  [visual_review] Page {page_num}: Claude CLI timed out, skipping",
-                  file=sys.stderr)
-            continue
         except json.JSONDecodeError as e:
             print(f"  [visual_review] Page {page_num}: Failed to parse response: {e}",
                   file=sys.stderr)

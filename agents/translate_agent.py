@@ -9,8 +9,6 @@ import argparse
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -27,16 +25,18 @@ SUPPORTED_LANGUAGES = {
 }
 
 
-def find_claude_cli() -> str:
-    cli = shutil.which("claude")
-    if cli:
-        return cli
-    fallback = os.path.expanduser("~/.local/bin/claude")
-    if os.path.isfile(fallback):
-        return fallback
-    raise FileNotFoundError(
-        "claude CLI not found. Install it or ensure it is on PATH."
-    )
+def _make_client() -> "anthropic.Anthropic":
+    import anthropic as _anthropic
+    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    if auth_token:
+        return _anthropic.Anthropic(auth_token=auth_token, base_url=base_url)
+    return _anthropic.Anthropic(api_key=api_key, base_url=base_url)
+
+
+def _get_model() -> str:
+    return os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6")
 
 
 def _is_trivially_invariant(text: str) -> bool:
@@ -161,7 +161,6 @@ def _call_claude_translate(
     batch: list,
     src_name: str,
     tgt_name: str,
-    claude_cli: str,
     context_section: str = "",
     depth: int = 0,
 ) -> dict:
@@ -221,56 +220,51 @@ def _call_claude_translate(
     )
 
     try:
-        result = subprocess.run(
-            [claude_cli, "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=180,
+        client = _make_client()
+        message = client.messages.create(
+            model=_get_model(),
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
         )
-        raw = result.stdout.strip()
+        raw = message.content[0].text.strip()
         # Strip markdown fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         parsed = json.loads(raw)
         return {item["id"]: _restore_newlines(item["text"]) for item in parsed}
 
-    except subprocess.TimeoutExpired:
+    except Exception as exc:
+        # timeout-like: split batch
         if depth < 2 and len(batch) > 1:
             print(
-                f"    [timeout] batch of {len(batch)} timed out, splitting (depth={depth})...",
+                f"    [error] batch of {len(batch)} failed ({exc}), splitting (depth={depth})...",
                 flush=True,
             )
             mid = len(batch) // 2
             left = batch[:mid]
             right = batch[mid:]
             left_results = _call_claude_translate(
-                left, src_name, tgt_name, claude_cli, context_section, depth + 1
+                left, src_name, tgt_name, context_section, depth + 1
             )
             right_results = _call_claude_translate(
-                right, src_name, tgt_name, claude_cli, context_section, depth + 1
+                right, src_name, tgt_name, context_section, depth + 1
             )
-            # Re-map right indices (they start from 0 within their sub-batch)
             combined = dict(left_results)
             for k, v in right_results.items():
                 combined[k + mid] = v
             return combined
         else:
             print(
-                f"    [timeout] batch of {len(batch)} timed out at max depth, returning originals.",
+                f"    [error] batch of {len(batch)} failed at max depth ({exc}), returning originals.",
                 flush=True,
             )
             return {k: t for k, (_, t) in enumerate(batch)}
-
-    except (json.JSONDecodeError, KeyError) as exc:
-        print(f"    [parse error] {exc} — returning originals for this batch.", flush=True)
-        return {k: t for k, (_, t) in enumerate(batch)}
 
 
 def _call_claude_retry_translate(
     batch: list,
     src_name: str,
     tgt_name: str,
-    claude_cli: str,
 ) -> dict:
     """Retry translation with a forceful prompt for blocks the LLM left unchanged."""
     input_items = [{"id": k, "text": _protect_newlines(t)} for k, (_, t) in enumerate(batch)]
@@ -291,18 +285,18 @@ def _call_claude_retry_translate(
     )
 
     try:
-        result = subprocess.run(
-            [claude_cli, "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=120,
+        client = _make_client()
+        message = client.messages.create(
+            model=_get_model(),
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
         )
-        raw = result.stdout.strip()
+        raw = message.content[0].text.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         parsed = json.loads(raw)
         return {item["id"]: _restore_newlines(item["text"]) for item in parsed}
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError) as exc:
+    except (json.JSONDecodeError, KeyError, Exception) as exc:
         print(f"    [retry parse error] {exc} — keeping originals.", flush=True)
         return {k: t for k, (_, t) in enumerate(batch)}
 
@@ -320,7 +314,6 @@ def translate_texts(
     cache_path: Path,
     context: str,
     batch_size: int,
-    claude_cli: str,
 ) -> list:
     """
     Translate a flat list of texts.
@@ -357,7 +350,7 @@ def translate_texts(
         )
 
         local_results = _call_claude_translate(
-            batch, src_name, tgt_name, claude_cli, context
+            batch, src_name, tgt_name, context
         )
 
         for local_idx, translated in local_results.items():
@@ -382,7 +375,7 @@ def translate_texts(
         for batch_start in range(0, len(unchanged), batch_size):
             retry_batch = unchanged[batch_start: batch_start + batch_size]
             retry_results = _call_claude_retry_translate(
-                retry_batch, src_name, tgt_name, claude_cli
+                retry_batch, src_name, tgt_name
             )
             for local_idx, translated in retry_results.items():
                 orig_idx, orig_text = retry_batch[local_idx]
@@ -462,13 +455,6 @@ def main():
             except json.JSONDecodeError:
                 print(f"Warning: could not parse cache file {cache_path}, starting fresh.")
 
-    # Find Claude CLI
-    try:
-        claude_cli = find_claude_cli()
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
     # Load parsed.json
     with open(input_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -520,7 +506,6 @@ def main():
                 cache_path=cache_path,
                 context=context_text,
                 batch_size=args.batch,
-                claude_cli=claude_cli,
             )
             for idx_in_plain, orig_idx in enumerate(plain_indices):
                 t = plain_translated[idx_in_plain]
@@ -545,7 +530,6 @@ def main():
                 cache_path=cache_path,
                 context=context_text,
                 batch_size=args.batch,
-                claude_cli=claude_cli,
             )
 
             for idx_in_span, orig_idx in enumerate(span_indices):
