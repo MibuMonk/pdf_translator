@@ -50,6 +50,29 @@ Each fragment gets independently placed, losing the visual grouping.
 
 **Affected stage:** parse_agent (extraction) or consolidator (under-merging).
 
+### L5: Linebreak Inconsistency (换行不一致)
+
+**Symptom:** The same structural pattern (e.g., `■ heading` followed by `• bullet`)
+renders with a line break in some instances but without in others on the same page.
+
+**Mechanism:** Consolidator's cross-color merge produces blocks where `\n` between
+heading and bullets is present in some cases but missing in others, depending on
+whether the merge path (same-color vs cross-color) was taken.
+
+**Affected stage:** consolidator (merge inconsistency) or translate_agent (inconsistent
+`\n` preservation).
+
+### L6: Bbox Overlap (bbox 重叠)
+
+**Symptom:** Adjacent text blocks overlap visually — characters from one block render
+on top of another block's content, making both unreadable.
+
+**Mechanism:** layout_agent's `overflow_bbox` expansion pushes a block's insert_bbox
+into the space occupied by a neighboring block. No collision detection between
+expanded bboxes.
+
+**Affected stage:** layout_agent (overflow expansion without neighbor awareness).
+
 ## Translation Defects
 
 ### T1: Missing Translation (未翻译)
@@ -85,6 +108,8 @@ information from the source is absent.
 | P19 | C | L4 (section fragmentation), L1 (word split in "Fu nctions") |
 | P20 | D | L1 (word split: "Sc enarios", "Co nfiguration", "Ex ecution"), L2 (structure collapse), L3 (content drift) |
 | P21 | A | Clean rendering, good structure preservation |
+| P36 | C | L1 (word split: "LiDAR" broken inside table cell) |
+| P40 | D | L1 (unnatural breaks before "要求"), L6 (bbox overlap in dense right column) |
 
 ## Using This Taxonomy
 
