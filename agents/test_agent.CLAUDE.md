@@ -32,6 +32,11 @@ QA 检查，输出 test_report.json。
 7. **page_confidence** (post-processing)：per-page confidence scoring based on all check findings
 8. **fragmentation_check**：段落碎片化检测（不依赖 LLM）
    - `section_fragmentation`：■ heading 独立为一个 block，• bullets 在另一个 block（同列、y 间距小），severity=warning
+9. **visual_review_check**：视觉校阅（需要 Claude CLI + Vision）
+   - 对 LOW confidence 页面，将源文和译文截图发给 Claude Vision 做对比
+   - 使用 defect taxonomy (L1-L6, T1-T3) 统一语言
+   - 输出每页评级 (A-F) + 具体缺陷列表
+   - 可通过 --no-visual 跳过，Claude CLI 不可用时自动跳过
 
 ## Per-page Confidence Scoring
 

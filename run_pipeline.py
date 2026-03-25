@@ -91,6 +91,7 @@ def main():
     ap.add_argument("--context", default=None,     help="手動術語・背景知識ファイル")
     ap.add_argument("--thumbs",  default=None,     help="QA サムネイル出力ディレクトリ")
     ap.add_argument("--skip-qa", action="store_true", help="QA ステップをスキップ")
+    ap.add_argument("--no-visual", action="store_true", help="QA: skip visual review check")
     ap.add_argument("--workdir", default=None,     help="中間ファイル保存先 (省略時: tempdir)")
     args = ap.parse_args()
 
@@ -197,10 +198,13 @@ def main():
             str(AGENTS / "test_agent.py"),
             "--json",   str(translated_json),
             "--pdf",    str(output_pdf),
+            "--source-pdf", str(input_path),
             "--output", str(test_report),
         ]
         if args.thumbs:
             test_cmd += ["--thumbs", args.thumbs]
+        if args.no_visual:
+            test_cmd += ["--no-visual"]
         run(test_cmd, "Step 5/5: Test")
 
     # Cleanup

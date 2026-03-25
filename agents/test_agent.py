@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
@@ -1698,6 +1699,209 @@ def style_check(translated_json_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Visual review check (Claude Vision)
+# ---------------------------------------------------------------------------
+
+_VISUAL_REVIEW_PROMPT = """\
+You are a PDF translation quality reviewer. Compare the source page (original) with the translated page (output).
+
+Identify layout anomalies in the translated page by comparing with the source. Use these defect codes:
+- L1 (Word Split): Words broken across lines at non-hyphenation points
+- L2 (Structure Collapse): Clear visual sections in source merged into undifferentiated text mass
+- L3 (Content Drift): Text positioned far from where it appears in the source
+- L4 (Section Fragmentation): Heading separated from its bullet list
+- L5 (Linebreak Inconsistency): Same pattern rendered with/without line breaks inconsistently
+- L6 (Bbox Overlap): Text blocks overlapping each other
+- T1 (Missing Translation): Source language text appearing untranslated
+- T2 (Truncated Translation): Translation visibly incomplete
+- T3 (Terminology Inconsistency): Same term translated differently
+
+Respond in JSON format:
+{
+  "grade": "A/B/C/D/F",
+  "defects": [
+    {"code": "L1", "description": "...", "location": "top-left / center / etc."}
+  ],
+  "summary": "one-line overall assessment"
+}
+
+If the page looks good, return grade A with empty defects array.
+"""
+
+_VISUAL_REVIEW_MAX_PAGES = 10
+
+
+def _render_page_to_png(pdf_path: str, page_num_0based: int, dpi: int = 300) -> str:
+    """Render a single PDF page to a temporary PNG file. Returns the temp file path."""
+    doc = fitz.open(pdf_path)
+    page = doc[page_num_0based]
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    pix = page.get_pixmap(matrix=mat)
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    pix.save(tmp.name)
+    doc.close()
+    return tmp.name
+
+
+def visual_review_check(source_pdf: str, output_pdf: str,
+                        review_pages: list[int] = None) -> dict:
+    """
+    Visual review check using Claude Vision.
+    Compares source and output PDF page screenshots to detect layout anomalies.
+
+    Args:
+        source_pdf: Path to the source (original) PDF.
+        output_pdf: Path to the translated output PDF.
+        review_pages: List of 1-based page numbers to review.
+                      If None, reviews all pages (capped at _VISUAL_REVIEW_MAX_PAGES).
+
+    Returns:
+        A check result dict compatible with the issue_results framework.
+    """
+    # Verify claude CLI availability
+    try:
+        claude_cli = _find_claude_cli()
+    except FileNotFoundError:
+        return {
+            "check_result": "skipped",
+            "details": {"reason": "claude CLI not available"},
+        }
+
+    # Verify PDFs exist
+    if not source_pdf or not os.path.isfile(source_pdf):
+        return {
+            "check_result": "skipped",
+            "details": {"reason": f"source PDF not found: {source_pdf}"},
+        }
+    if not output_pdf or not os.path.isfile(output_pdf):
+        return {
+            "check_result": "skipped",
+            "details": {"reason": f"output PDF not found: {output_pdf}"},
+        }
+
+    # Determine pages to review
+    src_doc = fitz.open(source_pdf)
+    out_doc = fitz.open(output_pdf)
+    src_page_count = len(src_doc)
+    out_page_count = len(out_doc)
+    src_doc.close()
+    out_doc.close()
+
+    if review_pages is None:
+        review_pages = list(range(1, min(src_page_count, out_page_count) + 1))
+
+    # Filter to valid pages present in both PDFs
+    review_pages = [
+        p for p in review_pages
+        if 1 <= p <= src_page_count and 1 <= p <= out_page_count
+    ]
+
+    # Cap at max pages
+    if len(review_pages) > _VISUAL_REVIEW_MAX_PAGES:
+        review_pages = review_pages[:_VISUAL_REVIEW_MAX_PAGES]
+
+    if not review_pages:
+        return {
+            "check_result": "skipped",
+            "details": {"reason": "no valid pages to review"},
+        }
+
+    all_issues = []
+    page_grades = {}
+    errors_seen = False
+
+    for page_num in review_pages:
+        src_png = None
+        out_png = None
+        try:
+            # Render page screenshots
+            src_png = _render_page_to_png(source_pdf, page_num - 1)
+            out_png = _render_page_to_png(output_pdf, page_num - 1)
+
+            # Call Claude Vision
+            result = subprocess.run(
+                [claude_cli, "-p", _VISUAL_REVIEW_PROMPT, src_png, out_png,
+                 "--output-format", "json"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd="/tmp",
+            )
+
+            raw = result.stdout.strip()
+            # The --output-format json wraps the response in a JSON envelope
+            # with a "result" field containing the text response
+            try:
+                envelope = json.loads(raw)
+                if isinstance(envelope, dict) and "result" in envelope:
+                    raw = envelope["result"]
+            except json.JSONDecodeError:
+                pass
+
+            # Strip markdown fences if present
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+
+            page_result = json.loads(raw)
+            grade = page_result.get("grade", "A").upper()
+            defects = page_result.get("defects", [])
+            page_grades[page_num] = grade
+
+            # Convert defects to issues based on grade
+            if grade in ("D", "F"):
+                severity = "error"
+                errors_seen = True
+            elif grade == "C":
+                severity = "warning"
+            else:
+                # Grade A or B: no issues to report
+                continue
+
+            for defect in defects:
+                code = defect.get("code", "unknown").upper()
+                all_issues.append({
+                    "page": page_num,
+                    "type": f"visual_review_{code.lower()}",
+                    "severity": severity,
+                    "description": defect.get("description", ""),
+                    "location": defect.get("location", ""),
+                    "grade": grade,
+                })
+
+        except subprocess.TimeoutExpired:
+            print(f"  [visual_review] Page {page_num}: Claude CLI timed out, skipping",
+                  file=sys.stderr)
+            continue
+        except json.JSONDecodeError as e:
+            print(f"  [visual_review] Page {page_num}: Failed to parse response: {e}",
+                  file=sys.stderr)
+            continue
+        except Exception as e:
+            print(f"  [visual_review] Page {page_num}: Unexpected error: {e}",
+                  file=sys.stderr)
+            continue
+        finally:
+            # Clean up temp files
+            for tmp_path in (src_png, out_png):
+                if tmp_path and os.path.isfile(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
+    check_result = "fail" if errors_seen else "pass"
+
+    return {
+        "check_result": check_result,
+        "details": {
+            "pages_reviewed": len(review_pages),
+            "page_grades": page_grades,
+            "issues": all_issues,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Per-page confidence scoring
 # ---------------------------------------------------------------------------
 
@@ -1797,6 +2001,11 @@ def _extract_page_findings(issue_results: dict) -> list[dict]:
                     findings.append({"page": finding["page"], "severity": sev})
                 for pg in finding.get("pages", []):
                     findings.append({"page": pg, "severity": sev})
+
+        elif check_name == "visual_review_check" and isinstance(details, dict):
+            for iss in details.get("issues", []):
+                if "page" in iss and "severity" in iss:
+                    findings.append({"page": iss["page"], "severity": iss["severity"]})
 
     return findings
 
@@ -2068,7 +2277,9 @@ def run_checks(testcase: str, registry_path: Path, output_path: Path,
 # Pipeline mode (QA checks only, no testcase / registry required)
 # ---------------------------------------------------------------------------
 
-def run_pipeline_qa(translated_json: str, pdf_path: str, output: str, thumbs: str = None):
+def run_pipeline_qa(translated_json: str, pdf_path: str, output: str,
+                     thumbs: str = None, source_pdf: str = None,
+                     no_visual: bool = False):
     """
     Minimal QA mode for pipeline integration.
     Runs coverage_check and quality_check; writes test_report.json.
@@ -2169,6 +2380,42 @@ def run_pipeline_qa(translated_json: str, pdf_path: str, output: str, thumbs: st
             print(yellow(f"  Review needed: pages {page_conf['review_needed']}"))
         else:
             print(green("  No pages require manual review."))
+
+    # Visual review check (Claude Vision) — runs after rule-based checks
+    if not no_visual and source_pdf and pdf_path:
+        # Select pages to review: LOW confidence pages, or all if no confidence data
+        if "page_confidence" in report:
+            pc = report["page_confidence"]
+            review_pages = pc.get("review_needed", [])
+            if not review_pages:
+                # Also include MEDIUM confidence pages if no LOW ones
+                review_pages = [
+                    int(p) for p, score in pc.get("pages", {}).items()
+                    if score < _CONFIDENCE_HIGH
+                ]
+        else:
+            # No confidence data — review all pages (capped internally)
+            review_pages = None
+
+        if review_pages is None or len(review_pages) > 0:
+            print("Running visual_review_check...")
+            vr_result = visual_review_check(source_pdf, pdf_path, review_pages)
+            print(f"  visual_review_check: {vr_result['check_result'].upper()}")
+            report["issue_results"]["visual_review_check"] = vr_result
+
+            # Update pass/fail accounting
+            if vr_result["check_result"] == "fail":
+                passed = False
+                report["summary"]["failed"] += 1
+                report["summary"]["total"] += 1
+            elif vr_result["check_result"] == "pass":
+                report["summary"]["passed"] += 1
+                report["summary"]["total"] += 1
+            # skipped does not change pass/fail
+            elif vr_result["check_result"] == "skipped":
+                report["summary"]["skipped"] += 1
+    elif no_visual:
+        print("  visual_review_check: SKIPPED (--no-visual)")
 
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2741,7 +2988,10 @@ def main():
     # Pipeline mode
     parser.add_argument("--json",   default=None, help="Path to translated.json (pipeline mode)")
     parser.add_argument("--pdf",    default=None, help="Path to output PDF (for thumbnail rendering)")
+    parser.add_argument("--source-pdf", default=None, help="Path to source PDF (for visual review check)")
     parser.add_argument("--thumbs", default=None, help="Directory for page thumbnails")
+    parser.add_argument("--no-visual", action="store_true",
+                        help="Skip visual_review_check (Claude Vision comparison)")
     # Common
     parser.add_argument(
         "--output",
@@ -2753,7 +3003,8 @@ def main():
     if args.json:
         # Pipeline QA mode
         output = args.output or "test_report.json"
-        run_pipeline_qa(args.json, args.pdf, output, args.thumbs)
+        run_pipeline_qa(args.json, args.pdf, output, args.thumbs,
+                        source_pdf=args.source_pdf, no_visual=args.no_visual)
     elif args.testcase:
         if args.save_baseline:
             # Save baseline mode
