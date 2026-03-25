@@ -26,6 +26,37 @@ AGENTS = Path(__file__).parent / "agents"
 
 
 # ---------------------------------------------------------------------------
+# Source language auto-detection
+# ---------------------------------------------------------------------------
+
+def _detect_src_lang(pdf_path: Path, sample_pages: int = 5) -> str:
+    """
+    Detect predominant language of a PDF from character frequency.
+    - Hiragana / Katakana present  → "ja"
+    - CJK ideographs, no kana      → "zh"
+    - Otherwise                    → "en"
+    Only used as fallback when --src is not explicitly provided.
+    """
+    try:
+        import fitz
+        doc = fitz.open(str(pdf_path))
+        text = ""
+        for i in range(min(sample_pages, len(doc))):
+            text += doc[i].get_text()
+        doc.close()
+    except Exception:
+        return "en"
+
+    kana   = sum(1 for c in text if "\u3041" <= c <= "\u30ff")  # hiragana + katakana
+    cjk    = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    if kana > 10:
+        return "ja"
+    if cjk > 50:
+        return "zh"
+    return "en"
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -97,6 +128,12 @@ def main():
 
     input_path = Path(args.input).resolve()
     stem = input_path.stem
+
+    # Auto-detect source language when it would collide with target
+    # (user didn't set --src explicitly, default "en" would give src==tgt)
+    if args.src == args.tgt:
+        args.src = _detect_src_lang(input_path)
+        print(f"[auto-detect] src language: {args.src}")
 
     # Work directory
     if args.workdir:
