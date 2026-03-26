@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmd=$(jq -r '.tool_input.command'); if echo \"$cmd\" | grep -qE '(verify\\.sh|test_agent\\.py)'; then echo '{\"decision\": \"block\", \"reason\": \"Development/debug commands must be delegated to agents.\"}'; elif echo \"$cmd\" | grep -q 'run_pipeline\\.py' && ! echo \"$cmd\" | grep -q '\\-\\-skip-qa'; then echo '{\"decision\": \"block\", \"reason\": \"run_pipeline.py without --skip-qa is a dev/test run. Delegate to agents.\"}'; fi"
+            "command": "cmd=$(jq -r '.tool_input.command'); set -- $(printf '%s' \"$cmd\" | awk '{for(i=1;i<=NF;i++) if($i!~/^[A-Za-z_][A-Za-z0-9_]*=/) {printf \"%s \", $i}}'); t1=$(basename \"${1:-}\"); t2=\"${2:-}\"; if printf '%s' \"$t1\" | grep -qE '^(bash|sh|zsh|python3?)$'; then target=\"$t2\"; else target=\"\"; fi; if printf '%s' \"$target\" | grep -qE '(verify.sh|test_agent.py)$'; then echo '{\"decision\":\"block\",\"reason\":\"Development/debug commands must be delegated to agents.\"}'; elif printf '%s' \"$target\" | grep -qE 'run_pipeline.py$' && ! printf '%s' \"$cmd\" | grep -q -- '--skip-qa'; then echo '{\"decision\":\"block\",\"reason\":\"run_pipeline.py without --skip-qa is a dev/test run. Delegate to agents.\"}'; fi"
           }
         ]
       }
