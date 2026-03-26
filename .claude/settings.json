@@ -9,15 +9,6 @@
             "command": "ROOT=\"/Users/qirui/momenta/pdf_translator\"; fp=$(jq -r '.tool_input.file_path // \"\"'); case \"$fp\" in \"~/\"*) fp=\"$HOME/${fp#~/}\" ;; esac; blocked=0; case \"$fp\" in \"$ROOT/agents/\"*|\"$ROOT/contracts/\"*|\"$ROOT/scripts/\"*) blocked=1 ;; esac; [ \"$fp\" = \"$ROOT/run_pipeline.py\" ] && blocked=1; case \"$fp\" in \"$ROOT/consolidator\"*.py) blocked=1 ;; esac; remainder=\"${fp#$ROOT/}\"; case \"$remainder\" in *.py) case \"$remainder\" in */*) : ;; *) blocked=1 ;; esac ;; esac; [ \"$blocked\" = \"1\" ] && echo '{\"decision\": \"block\", \"reason\": \"Main thread must not edit project source files directly. Delegate to agents.\"}'; exit 0"
           }
         ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "cmd=$(jq -r '.tool_input.command'); set -- $(printf '%s' \"$cmd\" | awk '{for(i=1;i<=NF;i++) if($i!~/^[A-Za-z_][A-Za-z0-9_]*=/) {printf \"%s \", $i}}'); t1=$(basename \"${1:-}\"); t2=\"${2:-}\"; if printf '%s' \"$t1\" | grep -qE '^(bash|sh|zsh|python3?)$'; then target=\"$t2\"; else target=\"\"; fi; if printf '%s' \"$target\" | grep -qE '(verify.sh|test_agent.py)$'; then echo '{\"decision\":\"block\",\"reason\":\"Development/debug commands must be delegated to agents.\"}'; elif printf '%s' \"$target\" | grep -qE 'run_pipeline.py$' && ! printf '%s' \"$cmd\" | grep -q -- '--skip-qa'; then echo '{\"decision\":\"block\",\"reason\":\"run_pipeline.py without --skip-qa is a dev/test run. Delegate to agents.\"}'; fi"
-          }
-        ]
       }
     ]
   }
