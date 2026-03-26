@@ -1400,12 +1400,29 @@ def glyph_dropout_check(translated_json_path: str, pdf_path: str) -> dict:
     pdf_spans = extract_pdf_spans_by_page(Path(pdf_path))
     issues: list[dict] = []
 
-    for page_entry in pages:
+    # Load layout_plan.json to identify reflow-group blocks (their render
+    # positions differ from original bbox — don't report dropout there).
+    # Key: 0-based page index (matches translated.json pages array order).
+    _reflow_blocks: dict[int, set[int]] = {}  # page_index → set of block indices in multi-block groups
+    layout_plan_path = Path(translated_json_path).parent / "layout_plan.json"
+    if layout_plan_path.exists():
+        try:
+            with open(layout_plan_path, encoding="utf-8") as _f:
+                _plan = json.load(_f)
+            for _pi, _pp in enumerate(_plan.get("pages", [])):
+                for _grp in _pp.get("groups", []):
+                    if len(_grp.get("block_indices", [])) > 1:
+                        _reflow_blocks.setdefault(_pi, set()).update(_grp["block_indices"])
+        except Exception:
+            pass
+
+    for page_idx, page_entry in enumerate(pages):
         if not isinstance(page_entry, dict):
             continue
-        page_num = page_entry.get("page", page_entry.get("page_num", 0))
+        page_num = page_entry.get("page", page_entry.get("page_num", page_idx + 1))
         blocks = page_entry.get("blocks", [])
         spans = pdf_spans.get(page_num, [])
+        reflow_indices = _reflow_blocks.get(page_idx, set())
 
         for idx, block in enumerate(blocks):
             if not isinstance(block, dict):
@@ -1417,8 +1434,14 @@ def glyph_dropout_check(translated_json_path: str, pdf_path: str) -> dict:
             bbox = block.get("bbox", [0, 0, 0, 0])
             block_id = block.get("block_id", block.get("id", f"p{page_num:02d}_b{idx:03d}"))
 
-            # Collect all PDF spans overlapping this block's bbox
-            matched_spans = _collect_spans_in_bbox(spans, bbox, tolerance=10.0)
+            # Reflow-group blocks are rendered at a shifted y position;
+            # use all page spans so the character-presence check isn't
+            # confused by the position change.
+            if idx in reflow_indices:
+                matched_spans = spans
+            else:
+                matched_spans = _collect_spans_in_bbox(spans, bbox, tolerance=10.0)
+
             rendered_text = "".join(s["text"] for s in matched_spans)
 
             # Normalize: strip whitespace, normalize unicode for both strings
