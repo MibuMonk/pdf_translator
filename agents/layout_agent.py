@@ -723,7 +723,10 @@ def _estimate_text_height(text: str, font_size: float, bbox_width: float) -> flo
     if font_size <= 0 or bbox_width <= 0:
         return font_size  # single-line fallback
     lines = _estimate_lines_needed(text, font_size, bbox_width)
-    return lines * font_size * _LINE_HEIGHT_FACTOR
+    # Add 20% safety margin so reflow doesn't place the next block too close.
+    # Em-width estimation underestimates actual rendered height (descenders,
+    # inter-line spacing rounding), causing adjacent blocks to overlap.
+    return lines * font_size * _LINE_HEIGHT_FACTOR * 1.2
 
 
 def render_page(

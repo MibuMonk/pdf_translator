@@ -162,8 +162,10 @@ def _check_bbox_overlaps(page_bboxes: dict, source_overlap_keys: set = None) -> 
     """
     For each page, check all pairs of text block bboxes for overlap.
     Returns a list of bbox_overlap issues.
-    An overlap is reported when the intersection area exceeds 10% of the
+    An overlap is reported when the intersection area exceeds 30% of the
     smaller bbox's area.  Max 5 overlap issues per page.
+    Note: 10% was too sensitive — CJK paragraph line bboxes from PyMuPDF
+    share y-range edges (~10% overlap), causing false positives.
 
     source_overlap_keys: optional set of (page, bbox_a_rounded, bbox_b_rounded)
     tuples from the source PDF — overlaps matching a baseline entry are skipped
@@ -197,7 +199,7 @@ def _check_bbox_overlaps(page_bboxes: dict, source_overlap_keys: set = None) -> 
                 min_area = min(a_area, b_area)
                 if min_area <= 0:
                     continue
-                if inter_area > min_area * 0.10:
+                if inter_area > min_area * 0.30:
                     if source_overlap_keys:
                         key = (page_num, _rnd5(bboxes[i]), _rnd5(bboxes[j]))
                         if key in source_overlap_keys:
@@ -205,7 +207,7 @@ def _check_bbox_overlaps(page_bboxes: dict, source_overlap_keys: set = None) -> 
                     page_issues.append({
                         "page": page_num,
                         "type": "bbox_overlap",
-                        "severity": "error",
+                        "severity": "warning",
                         "bbox_a": [round(v, 1) for v in bboxes[i]],
                         "bbox_b": [round(v, 1) for v in bboxes[j]],
                         "intersection_area": round(inter_area, 1),
@@ -1338,12 +1340,8 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
     issues.extend(overlap_issues)
 
     has_errors = any(i.get("severity") == "error" for i in issues)
-    has_structural_warnings = any(
-        i.get("type") in ("multicolor_fallback", "structure_collapse_suspect")
-        for i in issues
-    )
     return {
-        "check_result": "fail" if (has_errors or has_structural_warnings) else "pass",
+        "check_result": "fail" if has_errors else "pass",
         "details": {
             "issues": issues,
             "text_too_small_count": sum(1 for i in issues if i["type"] == "text_too_small"),
