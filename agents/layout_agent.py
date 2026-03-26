@@ -533,6 +533,39 @@ def insert_text_fitting(
         return False
 
     if _try_commit(fit_size):
+        if has_cjk(text):
+            rendered = page.get_text("text", clip=bbox).strip()
+            rendered_chars = set(rendered.replace(" ", "").replace("\n", ""))
+            input_chars = set(c for c in text if not c.isspace())
+            missing = input_chars - rendered_chars
+            if len(missing) > 0.10 * len(input_chars):
+                # insert_textbox silently truncated — binary search to find smaller size
+                lo_s, hi_s = _ABS_MIN, fit_size * 0.85
+                best_s = None
+                for _ in range(8):
+                    mid_s = (lo_s + hi_s) / 2.0
+                    try:
+                        s = page.new_shape()
+                        kw = dict(
+                            fontsize=mid_s,
+                            fontname=fn,
+                            color=color,
+                            align=align,
+                            lineheight=_LINE_HEIGHT_FACTOR,
+                        )
+                        if fontfile:
+                            kw["fontfile"] = fontfile
+                        rc = s.insert_textbox(bbox, text, **kw)
+                        if rc >= 0:
+                            best_s = mid_s
+                            lo_s = mid_s
+                        else:
+                            hi_s = mid_s
+                    except Exception:
+                        hi_s = mid_s
+                if best_s is not None and _try_commit(best_s):
+                    return
+                print(f"[WARN] CJK glyph dropout unresolved after retry (missing {len(missing)}/{len(input_chars)} chars)", file=sys.stderr)
         return
 
     # fit_size didn't work — binary search downward with real font metrics
@@ -821,6 +854,9 @@ def render_page(
             if d.get("fill") is None or d.get("rect") is None:
                 continue
             bg_rect = fitz.Rect(d["rect"])
+            # Skip tiny decorative elements (chart dots, icons) — backgrounds must be substantial
+            if bg_rect.width * bg_rect.height < 400:
+                continue
             inter = rect & bg_rect
             if inter.is_empty:
                 continue
@@ -829,6 +865,41 @@ def render_page(
                 best_overlap = overlap
                 best_color = d["fill"]
         return best_color if best_overlap > 0.30 else None
+
+    def _sample_image_color(_rect: fitz.Rect) -> Optional[tuple]:
+        """Sample the page background color by scanning the full page and averaging
+        non-white, non-text pixels. Ignores near-white pixels to avoid picking up text."""
+        try:
+            pix = page.get_pixmap(matrix=fitz.Matrix(0.25, 0.25))  # 1/4 scale for speed
+            r_sum = g_sum = b_sum = count = 0
+            for y in range(pix.height):
+                for x in range(pix.width):
+                    pixel = pix.pixel(x, y)
+                    # Skip near-white pixels (text, logos, white backgrounds)
+                    if pixel[0] > 200 and pixel[1] > 200 and pixel[2] > 200:
+                        continue
+                    r_sum += pixel[0]
+                    g_sum += pixel[1]
+                    b_sum += pixel[2]
+                    count += 1
+            if count < 20:
+                return None
+            return (r_sum / count / 255.0, g_sum / count / 255.0, b_sum / count / 255.0)
+        except Exception:
+            return None
+
+    def _overlaps_image_obstacle(rect: fitz.Rect) -> bool:
+        """Return True if rect overlaps any image_obstacle by >30% of rect area."""
+        rect_area = rect.width * rect.height
+        if rect_area <= 0:
+            return False
+        for obs in image_obstacles:
+            inter = rect & obs
+            if inter.is_empty:
+                continue
+            if (inter.width * inter.height) / rect_area > 0.30:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Step 1: Redact
@@ -884,6 +955,10 @@ def render_page(
                 for rb in block.get("redact_bboxes", []):
                     r = fitz.Rect(rb)
                     bg_fill = _get_background_fill(r)
+                    if bg_fill is not None and all(c > 0.85 for c in bg_fill) and _overlaps_image_obstacle(r):
+                        bg_fill = None  # white fill rect is under image layer — image is the real bg
+                    if bg_fill is None and _overlaps_image_obstacle(r):
+                        bg_fill = _sample_image_color(r)
                     if bg_fill is not None:
                         bg_cover_rects.append((r, bg_fill))
                     else:
@@ -896,6 +971,12 @@ def render_page(
             for rb in block.get("redact_bboxes", []):
                 r = fitz.Rect(rb)
                 bg_fill = _get_background_fill(r)
+                if bg_fill is not None and all(c > 0.85 for c in bg_fill) and _overlaps_image_obstacle(r):
+                    bg_fill = None  # white fill rect is under image layer — image is the real bg
+                if bg_fill is None and _overlaps_image_obstacle(r):
+                    if all(c > 0.85 for c in block.get("color", [0, 0, 0])):
+                        continue  # white-on-image: skip redact entirely
+                    bg_fill = _sample_image_color(r)
                 if bg_fill is not None:
                     bg_cover_rects.append((r, bg_fill))
                 else:
