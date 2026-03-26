@@ -714,6 +714,18 @@ def _find_safe_expand_x_limits(
     return safe_x0, safe_x1
 
 
+def _estimate_text_height(text: str, font_size: float, bbox_width: float) -> float:
+    """Estimate rendered height of *text* at *font_size* inside *bbox_width*.
+
+    Uses newline-aware em-width estimation (same as _estimate_lines_needed).
+    Returns height in points including line-height factor.
+    """
+    if font_size <= 0 or bbox_width <= 0:
+        return font_size  # single-line fallback
+    lines = _estimate_lines_needed(text, font_size, bbox_width)
+    return lines * font_size * _LINE_HEIGHT_FACTOR
+
+
 def render_page(
     page: fitz.Page,
     page_data: dict,
@@ -722,8 +734,14 @@ def render_page(
     cjk_font: Optional[str],
     page_rect: fitz.Rect,
     plan_page: Optional[dict] = None,
+    no_reflow: bool = False,
 ) -> None:
-    """Redact and re-render one page."""
+    """Redact and re-render one page.
+
+    Args:
+        no_reflow: If True, skip all reflow logic (Phases 2/3/4).
+                   Enabled via --no-reflow CLI flag for A/B comparison.
+    """
     blocks = page_data.get("blocks", [])
     if not blocks:
         return
@@ -990,6 +1008,83 @@ def render_page(
                 fitting_sizes[i] = verify_size
 
     # ------------------------------------------------------------------
+    # Step 9c: Phase 2 — reflow position calculation
+    # For each multi-block group from space_planner, restack blocks
+    # vertically from the group anchor, preserving original inter-block
+    # gaps. Only y-coordinates change; x stays fixed.
+    # Skipped when --no-reflow is set or groups[] is absent in the plan.
+    # ------------------------------------------------------------------
+    # reflow_y[i] = (new_y0, new_y1) or None if this block is not reflowed
+    reflow_y: list[Optional[tuple]] = [None] * len(fitting_sizes)
+
+    if groups_raw and not no_reflow:
+        _REFLOW_PAGE_MARGIN = 10.0  # px margin from page bottom
+        _page_height = page_rect.height
+
+        for grp in groups_raw:
+            grp_indices = grp.get("block_indices", [])
+            if len(grp_indices) < 2:
+                continue  # single-block groups are never reflowed
+
+            # Only include indices that are in range and have fitting sizes
+            valid = [
+                bi for bi in grp_indices
+                if 0 <= bi < len(fitting_sizes) and fitting_sizes[bi] is not None
+            ]
+            if len(valid) < 2:
+                continue
+
+            # Sort by original y0 (top to bottom)
+            try:
+                sorted_grp = sorted(
+                    valid,
+                    key=lambda bi: bboxes[bi].y0 if bi < len(bboxes) else 0.0,
+                )
+            except Exception:
+                continue  # skip malformed group
+
+            cursor_y = float(grp["anchor"][1])  # y0 of first block in group
+
+            for pos, bi in enumerate(sorted_grp):
+                if bi >= len(bboxes) or bi >= len(fitting_sizes):
+                    break
+                blk_bbox = bboxes[bi]
+                fs = fitting_sizes[bi]
+                if fs is None or fs <= 0:
+                    continue
+
+                if pos == 0:
+                    inter_gap = 0.0
+                else:
+                    prev_bi = sorted_grp[pos - 1]
+                    prev_bbox = bboxes[prev_bi] if prev_bi < len(bboxes) else blk_bbox
+                    # Preserve original gap; clamp negative (overlapping source blocks)
+                    inter_gap = max(0.0, blk_bbox.y0 - prev_bbox.y1)
+
+                cursor_y += inter_gap
+                new_y0 = cursor_y
+
+                # Estimate rendered height using fitting_size
+                bw = blk_bbox.width if blk_bbox.width > 0 else (
+                    insert_bboxes[bi].width if bi < len(insert_bboxes) else 1.0
+                )
+                txt = translated_texts[bi] if bi < len(translated_texts) else ""
+                rh = _estimate_text_height(txt, fs, bw)
+                new_y1 = new_y0 + rh
+
+                # Stop reflow if we've run off the page
+                if new_y0 >= _page_height - _REFLOW_PAGE_MARGIN:
+                    logger.debug(
+                        "reflow: block %d new_y0=%.1f exceeds page bottom; stopping group",
+                        bi, new_y0,
+                    )
+                    break
+
+                new_y1 = min(new_y1, _page_height - _REFLOW_PAGE_MARGIN)
+                reflow_y[bi] = (new_y0, new_y1)
+                cursor_y = new_y1
+
+    # ------------------------------------------------------------------
     # Step 10: Consistency pass via VisualOptimizer
     # ------------------------------------------------------------------
     title_mask = [i in title_indices for i in range(len(fitting_sizes))]
@@ -1112,10 +1207,20 @@ def render_page(
 
     # ------------------------------------------------------------------
     # Step 11: Phase 3 — render
+    # Phase 4: if a block has a reflow_y entry (from Step 9c), use the
+    # reflow bbox [x0, new_y0, x1, new_y1] instead of insert_bbox.
     # ------------------------------------------------------------------
     for idx, (ibbox, text, rs, align) in enumerate(
         zip(insert_bboxes, translated_texts, render_sizes, aligns)
     ):
+        # Phase 4: apply reflow position when available
+        if idx < len(reflow_y) and reflow_y[idx] is not None:
+            try:
+                ry0, ry1 = reflow_y[idx]
+                ibbox = fitz.Rect(ibbox.x0, ry0, ibbox.x1, ry1)
+            except Exception:
+                pass  # fall back to original insert_bbox on any error
+
         # REQ-2: fall back to original block text if preprocessed text is blank
         if not text.strip() and idx < len(blocks):
             text = blocks[idx].get("text", text)
@@ -1210,6 +1315,10 @@ def main() -> None:
     parser.add_argument("--pages", default=None, help='Page spec, e.g. "1,3,5-8"')
     parser.add_argument("--plan", default=None, help="layout_plan.json from space_planner (optional)")
     parser.add_argument("--tgt", default="ja", help="Target language code (default: ja)")
+    parser.add_argument(
+        "--no-reflow", dest="no_reflow", action="store_true",
+        help="Disable group reflow (Phases 2/3/4). Useful for A/B comparison.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
