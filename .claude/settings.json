@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"decision\": \"block\", \"reason\": \"Main thread must not implement directly. Delegate all code edits to agents.\"}'"
+            "command": "ROOT=\"/Users/qirui/momenta/pdf_translator\"; fp=$(jq -r '.tool_input.file_path // \"\"'); case \"$fp\" in \"~/\"*) fp=\"$HOME/${fp#~/}\" ;; esac; blocked=0; case \"$fp\" in \"$ROOT/agents/\"*|\"$ROOT/contracts/\"*|\"$ROOT/scripts/\"*) blocked=1 ;; esac; [ \"$fp\" = \"$ROOT/run_pipeline.py\" ] && blocked=1; case \"$fp\" in \"$ROOT/consolidator\"*.py) blocked=1 ;; esac; remainder=\"${fp#$ROOT/}\"; case \"$remainder\" in *.py) case \"$remainder\" in */*) : ;; *) blocked=1 ;; esac ;; esac; [ \"$blocked\" = \"1\" ] && echo '{\"decision\": \"block\", \"reason\": \"Main thread must not edit project source files directly. Delegate to agents.\"}'; exit 0"
           }
         ]
       },
