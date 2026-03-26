@@ -155,8 +155,36 @@ def _detect_groups(
 
     for gid in sorted(container_buckets):
         members = container_buckets[gid]
-        groups.append(_make_group(members, bboxes))
-        for i in members:
+        # Sort top-to-bottom
+        members.sort(key=lambda i: bboxes[i][1])
+
+        if len(members) == 1:
+            groups.append(_make_group(members, bboxes))
+            assigned[members[0]] = True
+            continue
+
+        # Compute vertical gaps between consecutive members
+        gaps = [
+            max(0.0, bboxes[members[k]][1] - bboxes[members[k - 1]][3])
+            for k in range(1, len(members))
+        ]
+        med_gap = median(gaps)
+        ref_gap = max(med_gap, 2.0)
+        threshold = max(ref_gap * 2.0, 50.0)  # absolute floor: 50px
+
+        # Split wherever gap exceeds threshold
+        current_subgroup = [members[0]]
+        for k, gap in enumerate(gaps):
+            next_member = members[k + 1]
+            if gap > threshold:
+                groups.append(_make_group(current_subgroup, bboxes))
+                for i in current_subgroup:
+                    assigned[i] = True
+                current_subgroup = [next_member]
+            else:
+                current_subgroup.append(next_member)
+        groups.append(_make_group(current_subgroup, bboxes))
+        for i in current_subgroup:
             assigned[i] = True
 
     # ------------------------------------------------------------------
