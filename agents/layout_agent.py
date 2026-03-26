@@ -761,15 +761,50 @@ def render_page(
 
     # ------------------------------------------------------------------
     # Step 1: Redact
+    # Phase 3: for multi-block groups, redact the union bbox of all blocks
+    # in the group (original positions) so the full reflow region is cleared.
+    # Single-block groups and non-group blocks use per-block redact logic.
+    # Skipped when --no-reflow is set.
     # ------------------------------------------------------------------
-    for block in blocks:
-        for rb in block.get("redact_bboxes", []):
-            r = fitz.Rect(rb)
-            if _has_background_overlap(r):
-                # Transparent fill: removes text but preserves background (REQ-1)
-                page.add_redact_annot(r, fill=None)
-            else:
-                page.add_redact_annot(r)
+    groups_raw = (plan_page or {}).get("groups", [])
+    # Build mapping: block_idx → union_bbox for blocks in multi-block groups
+    _group_union_bbox: dict[int, fitz.Rect] = {}
+    if groups_raw and not no_reflow:
+        for grp in groups_raw:
+            indices = grp.get("block_indices", [])
+            if len(indices) < 2:
+                continue
+            union: Optional[fitz.Rect] = None
+            for bi in indices:
+                if bi < 0 or bi >= len(blocks):
+                    continue
+                for rb in blocks[bi].get("redact_bboxes", []):
+                    r = fitz.Rect(rb)
+                    union = r if union is None else union | r
+            if union is not None and not union.is_empty:
+                for bi in indices:
+                    _group_union_bbox[bi] = union
+
+    # Track already-added union rects to avoid redundant annotations
+    _union_rects_added: set[tuple] = set()
+    for blk_idx, block in enumerate(blocks):
+        if blk_idx in _group_union_bbox:
+            union_r = _group_union_bbox[blk_idx]
+            key = (union_r.x0, union_r.y0, union_r.x1, union_r.y1)
+            if key not in _union_rects_added:
+                _union_rects_added.add(key)
+                if _has_background_overlap(union_r):
+                    page.add_redact_annot(union_r, fill=None)
+                else:
+                    page.add_redact_annot(union_r)
+        else:
+            for rb in block.get("redact_bboxes", []):
+                r = fitz.Rect(rb)
+                if _has_background_overlap(r):
+                    # Transparent fill: removes text but preserves background (REQ-1)
+                    page.add_redact_annot(r, fill=None)
+                else:
+                    page.add_redact_annot(r)
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
     # ------------------------------------------------------------------
@@ -1322,6 +1357,7 @@ def main() -> None:
             cjk_font=cjk_font,
             page_rect=page_rect,
             plan_page=plan_map.get(key),
+            no_reflow=args.no_reflow,
         )
 
     doc.save(str(output_path), garbage=4, deflate=True)
