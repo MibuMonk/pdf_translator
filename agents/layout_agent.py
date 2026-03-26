@@ -856,6 +856,18 @@ def render_page(
                 for bi in indices:
                     _group_union_bbox[bi] = union
 
+    # Pre-identify groups where ANY member block overlaps a colored background.
+    # union_r is typically much wider than individual blocks, so checking it
+    # against the background threshold fails.  Per-block check is required.
+    _bg_group_keys: set[tuple] = set()
+    for _bi, _ur in _group_union_bbox.items():
+        if _bi >= len(blocks):
+            continue
+        for _rb in blocks[_bi].get("redact_bboxes", []):
+            if _get_background_fill(fitz.Rect(_rb)) is not None:
+                _bg_group_keys.add((_ur.x0, _ur.y0, _ur.x1, _ur.y1))
+                break
+
     # Step 1: Redact original text / cover with background color
     # For blocks WITHOUT a colored background: use redact (fills with white)
     # For blocks WITH a colored background: draw a same-color rect to cover
@@ -867,12 +879,18 @@ def render_page(
         if blk_idx in _group_union_bbox:
             union_r = _group_union_bbox[blk_idx]
             key = (union_r.x0, union_r.y0, union_r.x1, union_r.y1)
-            if key not in _union_rects_added:
-                _union_rects_added.add(key)
-                bg_fill = _get_background_fill(union_r)
-                if bg_fill is not None:
-                    bg_cover_rects.append((union_r, bg_fill))
-                else:
+            if key in _bg_group_keys:
+                # Per-block handling: any member may have a colored background
+                for rb in block.get("redact_bboxes", []):
+                    r = fitz.Rect(rb)
+                    bg_fill = _get_background_fill(r)
+                    if bg_fill is not None:
+                        bg_cover_rects.append((r, bg_fill))
+                    else:
+                        page.add_redact_annot(r)
+            else:
+                if key not in _union_rects_added:
+                    _union_rects_added.add(key)
                     page.add_redact_annot(union_r)
         else:
             for rb in block.get("redact_bboxes", []):
