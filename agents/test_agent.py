@@ -227,7 +227,7 @@ def _check_content_drift(pages: list, pdf_spans: dict, drift_tolerance: float = 
     """
     issues = []
     for page_entry in pages:
-        page_num = page_entry.get("page", page_entry.get("page_number", 0))
+        page_num = page_entry.get("page", page_entry.get("page_num", 0))
         blocks = page_entry.get("blocks", [])
         spans = pdf_spans.get(page_num, [])
         for idx, block in enumerate(blocks):
