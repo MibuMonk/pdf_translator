@@ -509,7 +509,7 @@ def insert_text_fitting(
     # fit (rc < 0), binary-search with real insert_textbox to find a size that
     # works.  This fixes CJK blocks where em-width approximation overestimates
     # capacity, causing text to disappear entirely.
-    _ABS_MIN = 4.0  # absolute minimum to prevent invisible text
+    _ABS_MIN = 3.0  # absolute minimum to prevent invisible text (Bug C fix: lowered from 4.0)
 
     def _try_commit(size: float) -> bool:
         """Try to render text at *size*; return True if successful."""
@@ -989,10 +989,18 @@ def render_page(
                 align=aligns[i],
                 page_rect=constrained_rect,
             )
-            # Clamp downward expansion to avoid overlapping neighbor blocks
+            # Clamp downward expansion to avoid overlapping neighbor blocks.
+            # Bug A fix: if the clamp would shrink the bbox below 50% of its
+            # pre-expansion height (already-overlapping source bboxes), skip it —
+            # clamping here would produce a bbox shorter than the original.
+            orig_height = insert_bboxes[i].height
             neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
             if expanded.y1 > neighbor_y1_limit:
-                expanded = fitz.Rect(expanded.x0, expanded.y0, expanded.x1, neighbor_y1_limit)
+                clamped_height = neighbor_y1_limit - expanded.y0
+                if clamped_height < orig_height * 0.5:
+                    pass  # skip clamp — it would shrink below original bbox height
+                else:
+                    expanded = fitz.Rect(expanded.x0, expanded.y0, expanded.x1, neighbor_y1_limit)
             insert_bboxes[i] = expanded
             # Verify text actually fits at 8pt in expanded bbox; if not,
             # re-fit with a lower floor so text renders (small > invisible).
