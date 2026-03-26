@@ -729,6 +729,36 @@ def _estimate_text_height(text: str, font_size: float, bbox_width: float) -> flo
     return lines * font_size * _LINE_HEIGHT_FACTOR * 1.2
 
 
+def _overflow_expand(
+    i: int,
+    insert_bboxes: list,
+    text: str,
+    size: float,
+    align,
+    visual: "VisualOptimizer",
+    page_rect: "fitz.Rect",
+) -> "fitz.Rect":
+    """
+    Expand insert_bboxes[i] to fit `text` at `size` pt.
+    Respects horizontal neighbor limits and clamps downward expansion
+    to avoid overlapping the next block (with a 50% height guard).
+    Returns the expanded fitz.Rect (or the original if expansion fails).
+    """
+    safe_x0, safe_x1 = _find_safe_expand_x_limits(i, insert_bboxes, page_rect)
+    constrained_rect = fitz.Rect(safe_x0, page_rect.y0, safe_x1, page_rect.y1)
+    expanded = visual.overflow_bbox(
+        insert_bboxes[i], text, size,
+        color=(0, 0, 0), align=align, page_rect=constrained_rect,
+    )
+    orig_height = insert_bboxes[i].height
+    neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
+    if expanded.y1 > neighbor_y1_limit:
+        clamped_height = neighbor_y1_limit - expanded.y0
+        if clamped_height >= orig_height * 0.5:
+            expanded = fitz.Rect(expanded.x0, expanded.y0, expanded.x1, neighbor_y1_limit)
+    return expanded
+
+
 def render_page(
     page: fitz.Page,
     page_data: dict,
@@ -982,28 +1012,10 @@ def render_page(
     overflow_expanded = [False] * len(fitting_sizes)  # track which blocks were expanded
     for i in range(len(fitting_sizes)):
         if fitting_sizes[i] < _READABILITY_FLOOR and translated_texts[i].strip():
-            safe_x0, safe_x1 = _find_safe_expand_x_limits(i, insert_bboxes, page_rect)
-            constrained_rect = fitz.Rect(safe_x0, page_rect.y0, safe_x1, page_rect.y1)
-            expanded = visual.overflow_bbox(
-                insert_bboxes[i],
-                translated_texts[i],
-                _READABILITY_FLOOR,
-                color=(0, 0, 0),
-                align=aligns[i],
-                page_rect=constrained_rect,
+            expanded = _overflow_expand(
+                i, insert_bboxes, translated_texts[i], _READABILITY_FLOOR,
+                aligns[i], visual, page_rect,
             )
-            # Clamp downward expansion to avoid overlapping neighbor blocks.
-            # Bug A fix: if the clamp would shrink the bbox below 50% of its
-            # pre-expansion height (already-overlapping source bboxes), skip it —
-            # clamping here would produce a bbox shorter than the original.
-            orig_height = insert_bboxes[i].height
-            neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
-            if expanded.y1 > neighbor_y1_limit:
-                clamped_height = neighbor_y1_limit - expanded.y0
-                if clamped_height < orig_height * 0.5:
-                    pass  # skip clamp — it would shrink below original bbox height
-                else:
-                    expanded = fitz.Rect(expanded.x0, expanded.y0, expanded.x1, neighbor_y1_limit)
             insert_bboxes[i] = expanded
             # Verify text actually fits at 8pt in expanded bbox; if not,
             # re-fit with a lower floor so text renders (small > invisible).
@@ -1183,20 +1195,10 @@ def render_page(
         lines_needed = _estimate_lines_needed(translated_texts[i], rs, ibbox.width)
         height_needed = lines_needed * rs * _LINE_HEIGHT_FACTOR
         if height_needed > ibbox.height * 1.1:  # >10% overflow
-            safe_x0, safe_x1 = _find_safe_expand_x_limits(i, insert_bboxes, page_rect)
-            constrained_rect = fitz.Rect(safe_x0, page_rect.y0, safe_x1, page_rect.y1)
-            expanded = visual.overflow_bbox(
-                ibbox,
-                translated_texts[i],
-                rs,
-                color=(0, 0, 0),
-                align=aligns[i],
-                page_rect=constrained_rect,
+            expanded = _overflow_expand(
+                i, insert_bboxes, translated_texts[i], rs,
+                aligns[i], visual, page_rect,
             )
-            # Clamp downward expansion to avoid overlapping neighbor blocks
-            neighbor_y1_limit = _find_neighbor_y1_limit(i, insert_bboxes)
-            if expanded.y1 > neighbor_y1_limit:
-                expanded = fitz.Rect(expanded.x0, expanded.y0, expanded.x1, neighbor_y1_limit)
             insert_bboxes[i] = expanded
 
             # Check if expansion was sufficient — re-estimate overflow
