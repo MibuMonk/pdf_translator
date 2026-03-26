@@ -9,6 +9,15 @@
             "command": "echo '{\"decision\": \"block\", \"reason\": \"Main thread must not implement directly. Delegate all code edits to agents.\"}'"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r '.tool_input.command'); if echo \"$cmd\" | grep -qE '(verify\\.sh|test_agent\\.py)'; then echo '{\"decision\": \"block\", \"reason\": \"Development/debug commands must be delegated to agents.\"}'; elif echo \"$cmd\" | grep -q 'run_pipeline\\.py' && ! echo \"$cmd\" | grep -q '\\-\\-skip-qa'; then echo '{\"decision\": \"block\", \"reason\": \"run_pipeline.py without --skip-qa is a dev/test run. Delegate to agents.\"}'; fi"
+          }
+        ]
       }
     ]
   }
