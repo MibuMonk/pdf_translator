@@ -440,6 +440,11 @@ def translation_completeness_check(translated_json_path: str) -> dict:
             if not text:
                 continue
 
+            # Skip trivially-invariant content (numbers, symbols) from ratio;
+            # these are correctly left unchanged and should not penalise the score.
+            if _is_trivially_invariant(text):
+                continue
+
             total_chars += len(text)
 
             # Check if translated differs from source
@@ -1560,7 +1565,7 @@ def fragmentation_check(translated_data) -> dict:
 # Translation QA checks (from qa_agent)
 # ---------------------------------------------------------------------------
 
-_TRIVIAL_RE = re.compile(r'^[\d\s.,;:!?()[\]/%+\-=\\\'\"]*$')
+_TRIVIAL_RE = re.compile(r'^[\d\s.,;:!?()\[\]/%+\-=\\\'\"\u00b1\u00d7\u00f7\u2248\u2264\u2265\u221e\u00b0\u00b5\u03b1-\u03c9\u0391-\u03a9]*$')
 _ACRONYM_DEF_RE = re.compile(r'^[A-Z]{2,}[0-9A-Z]*[\s\n]*[\(:]')
 # Matches strings that contain ONLY ASCII-range characters (letters, digits,
 # punctuation, spaces).  No CJK, kana, hangul, or other non-ASCII scripts.
