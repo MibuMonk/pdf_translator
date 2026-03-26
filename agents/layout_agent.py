@@ -975,7 +975,8 @@ def render_page(
                     bg_fill = None  # white fill rect is under image layer — image is the real bg
                 if bg_fill is None and _overlaps_image_obstacle(r):
                     if all(c > 0.85 for c in block.get("color", [0, 0, 0])):
-                        continue  # white-on-image: skip redact entirely
+                        page.add_redact_annot(r, fill=None)  # white-on-image: erase text, no fill, image bg shows through
+                        continue
                     bg_fill = _sample_image_color(r)
                 if bg_fill is not None:
                     bg_cover_rects.append((r, bg_fill))
