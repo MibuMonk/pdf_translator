@@ -218,6 +218,74 @@ def _check_bbox_overlaps(page_bboxes: dict, source_overlap_keys: set = None) -> 
     return issues
 
 
+def _check_content_drift(pages: list, pdf_spans: dict, drift_tolerance: float = 60.0, min_area: float = 300.0) -> list[dict]:
+    """
+    Detect L3 content drift: translated block bbox has no rendered text nearby.
+    For each block, expand the planned bbox by drift_tolerance on all sides and check
+    if any PDF span falls within that zone. If not, compute distance to nearest span
+    center; if > drift_tolerance, report a content_drift issue.
+    """
+    issues = []
+    for page_entry in pages:
+        page_num = page_entry.get("page", page_entry.get("page_number", 0))
+        blocks = page_entry.get("blocks", [])
+        spans = pdf_spans.get(page_num, [])
+        for idx, block in enumerate(blocks):
+            # Skip blocks with no translated text
+            translated = block.get("translated_text") or block.get("translated", "")
+            if not translated or not translated.strip():
+                continue
+            bbox = block.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            x0, y0, x1, y1 = bbox
+            area = (x1 - x0) * (y1 - y0)
+            if area < min_area:
+                continue
+
+            block_id = block.get("block_id", block.get("id", f"p{page_num:02d}_b{idx:03d}"))
+
+            # Expand bbox by drift_tolerance on all sides
+            ex0 = x0 - drift_tolerance
+            ey0 = y0 - drift_tolerance
+            ex1 = x1 + drift_tolerance
+            ey1 = y1 + drift_tolerance
+
+            # Check if any span overlaps with expanded bbox
+            found_in_zone = False
+            for span in spans:
+                sx0, sy0, sx1, sy1 = span["bbox"]
+                if sx1 > ex0 and sx0 < ex1 and sy1 > ey0 and sy0 < ey1:
+                    found_in_zone = True
+                    break
+
+            if found_in_zone:
+                continue
+
+            # No span found — compute distance from planned bbox center to nearest span center
+            cx = (x0 + x1) / 2
+            cy = (y0 + y1) / 2
+            min_dist = float("inf")
+            for span in spans:
+                sx0, sy0, sx1, sy1 = span["bbox"]
+                scx = (sx0 + sx1) / 2
+                scy = (sy0 + sy1) / 2
+                dist = math.hypot(scx - cx, scy - cy)
+                if dist < min_dist:
+                    min_dist = dist
+
+            if min_dist > drift_tolerance:
+                issues.append({
+                    "page": page_num,
+                    "block_id": block_id,
+                    "type": "content_drift",
+                    "severity": "warning",
+                    "planned_bbox": [round(v, 1) for v in bbox],
+                    "nearest_span_distance": round(min_dist, 1),
+                })
+    return issues
+
+
 def find_best_span_match(target_bbox, spans, tolerance=5.0):
     """
     Find the span whose y-center overlaps with target_bbox's y-range and whose
@@ -1016,6 +1084,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
     - word_split: English word broken across \\n in translated text (e.g. "Sc\\nenarios")
     - number_unit_split: abbr/number token wrapped across visual lines in PDF (e.g. "UNP\\n1000", "8,000\\nkm")
     - bbox_overlap: overlapping text block bboxes in rendered PDF (intersection > 10% of smaller)
+    - content_drift: planned block bbox has no rendered text nearby (L3)
     """
     with open(translated_json_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -1375,6 +1444,10 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
     overlap_issues = _check_bbox_overlaps(pdf_block_bboxes, source_overlap_keys)
     issues.extend(overlap_issues)
 
+    # --- content_drift: detect text rendered far from its planned position ---
+    drift_issues = _check_content_drift(pages, pdf_spans)
+    issues.extend(drift_issues)
+
     has_errors = any(i.get("severity") == "error" for i in issues)
     return {
         "check_result": "fail" if has_errors else "pass",
@@ -1388,6 +1461,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
             "word_split_count": sum(1 for i in issues if i["type"] == "word_split"),
             "number_unit_split_count": sum(1 for i in issues if i["type"] == "number_unit_split"),
             "bbox_overlap_count": sum(1 for i in issues if i["type"] == "bbox_overlap"),
+            "content_drift_count": sum(1 for i in issues if i["type"] == "content_drift"),
         },
     }
 
