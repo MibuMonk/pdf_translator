@@ -17,6 +17,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from statistics import median
 from typing import Optional
 
 import fitz  # PyMuPDF
@@ -56,6 +57,177 @@ def _parse_pages(spec: str) -> list[int]:
     return sorted(pages)
 
 
+# ---------------------------------------------------------------------------
+# Group detection
+# ---------------------------------------------------------------------------
+
+def _make_group(indices: list[int], bboxes: list[list]) -> dict:
+    """Build a group dict from a list of block indices and their bboxes.
+
+    Parameters
+    ----------
+    indices:
+        0-based indices into the page's blocks[] array.
+    bboxes:
+        List of [x0, y0, x1, y1] for each block (parallel to page blocks[]).
+    """
+    # Sort by y0 to determine topmost block (anchor)
+    sorted_idx = sorted(indices, key=lambda i: bboxes[i][1])
+    anchor_bbox = bboxes[sorted_idx[0]]
+    anchor = [anchor_bbox[0], anchor_bbox[1]]
+
+    # region_bbox = union of all member bboxes
+    x0 = min(bboxes[i][0] for i in indices)
+    y0 = min(bboxes[i][1] for i in indices)
+    x1 = max(bboxes[i][2] for i in indices)
+    y1 = max(bboxes[i][3] for i in indices)
+
+    return {
+        "block_indices": sorted(indices),
+        "anchor": anchor,
+        "region_bbox": [x0, y0, x1, y1],
+    }
+
+
+def _detect_groups(
+    page_blocks: list[dict],
+    topo_result,  # TopologyResult or None
+) -> list[dict]:
+    """Detect reflow groups for a page.
+
+    Rules (applied in priority order):
+
+    1. Container-based groups: blocks sharing the same non-(-1) group_id
+       (from topology_agent) form one group each.
+    2. Column-based groups: unassigned blocks with the same column_id (not -1)
+       AND without large vertical gaps. A gap > 2x the median gap of that
+       column triggers a split into separate groups.
+    3. Table-cell exclusion: unassigned blocks that share a row_id (not -1,
+       meaning they are horizontal neighbours) are NOT merged into column
+       groups — each becomes its own single-element group.
+    4. Ungrouped blocks: any remaining unassigned block forms a single-element
+       group (no reflow applied to these).
+
+    Returns a list of group dicts:
+        {
+            "block_indices": [int, ...],   # 0-based indices into page's blocks[]
+            "anchor": [x0, y0],            # top-left of topmost block
+            "region_bbox": [x0, y0, x1, y1]
+        }
+
+    Each block appears in exactly one group. Single-block groups are valid.
+
+    Edge cases:
+    - Empty page (no blocks): returns [].
+    - Single-block page: returns one single-element group.
+    - No topology data (topo_result is None): all blocks become single-element
+      groups.
+    - All blocks in containers: column pass is a no-op.
+    """
+    n = len(page_blocks)
+    if n == 0:
+        return []
+
+    # Bboxes as plain lists [x0, y0, x1, y1] for JSON-safe arithmetic
+    bboxes = [b["bbox"] for b in page_blocks]
+
+    # Pull topology arrays (fall back to all-(-1) if topology is absent)
+    if topo_result is not None:
+        group_ids  = topo_result.group_ids   # len == n, -1 = no container
+        column_ids = topo_result.column_ids  # len == n, -1 = isolated
+        row_ids    = topo_result.row_ids     # len == n, -1 = isolated
+    else:
+        group_ids  = [-1] * n
+        column_ids = [-1] * n
+        row_ids    = [-1] * n
+
+    # assigned[i] = True once block i has been placed into a group
+    assigned = [False] * n
+    groups: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Rule 1: Container-based groups
+    # ------------------------------------------------------------------
+    container_buckets: dict[int, list[int]] = {}
+    for i, gid in enumerate(group_ids):
+        if gid != -1:
+            container_buckets.setdefault(gid, []).append(i)
+
+    for gid in sorted(container_buckets):
+        members = container_buckets[gid]
+        groups.append(_make_group(members, bboxes))
+        for i in members:
+            assigned[i] = True
+
+    # ------------------------------------------------------------------
+    # Rule 3 (pre-pass): identify horizontal neighbours (table cells).
+    # These must NOT be merged via column grouping.
+    # ------------------------------------------------------------------
+    in_horizontal_row: set[int] = set()
+    for i, rid in enumerate(row_ids):
+        if rid != -1 and not assigned[i]:
+            in_horizontal_row.add(i)
+
+    # ------------------------------------------------------------------
+    # Rule 2: Column-based groups
+    # ------------------------------------------------------------------
+    column_buckets: dict[int, list[int]] = {}
+    for i, cid in enumerate(column_ids):
+        if not assigned[i] and cid != -1 and i not in in_horizontal_row:
+            column_buckets.setdefault(cid, []).append(i)
+
+    for cid in sorted(column_buckets):
+        members = column_buckets[cid]
+        # Sort members top-to-bottom by block y0
+        members.sort(key=lambda i: bboxes[i][1])
+
+        # Compute vertical gaps between consecutive members
+        gaps = []
+        for k in range(1, len(members)):
+            prev_y1 = bboxes[members[k - 1]][3]  # y1 of previous block
+            curr_y0 = bboxes[members[k]][1]       # y0 of current block
+            gaps.append(max(0.0, curr_y0 - prev_y1))
+
+        if not gaps:
+            # Single member in column bucket (edge case: topology assigned
+            # column_id to an isolated block; treat as single-element group)
+            groups.append(_make_group(members, bboxes))
+            for i in members:
+                assigned[i] = True
+            continue
+
+        med_gap = median(gaps)
+        # Use a minimum reference gap to avoid splitting on very tight slides
+        # where all gaps are near-zero (would split on any non-zero gap)
+        ref_gap = max(med_gap, 2.0)
+        threshold = ref_gap * 2.0
+
+        # Split into sub-groups wherever a gap exceeds the threshold
+        current_subgroup = [members[0]]
+        for k, gap in enumerate(gaps):
+            next_member = members[k + 1]
+            if gap > threshold:
+                groups.append(_make_group(current_subgroup, bboxes))
+                for i in current_subgroup:
+                    assigned[i] = True
+                current_subgroup = [next_member]
+            else:
+                current_subgroup.append(next_member)
+        # Flush last sub-group
+        groups.append(_make_group(current_subgroup, bboxes))
+        for i in current_subgroup:
+            assigned[i] = True
+
+    # ------------------------------------------------------------------
+    # Rules 3 & 4: Single-element groups for all remaining blocks
+    # (horizontal-neighbour table cells and truly isolated blocks)
+    # ------------------------------------------------------------------
+    for i in range(n):
+        if not assigned[i]:
+            groups.append(_make_group([i], bboxes))
+            assigned[i] = True
+
+    return groups
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +272,11 @@ def _plan_page(
     topo_result = topo.analyze(bboxes, alignments, drawings, image_obstacles)
     insert_bboxes = topo_result.insert_bboxes
     container_colors = topo_result.container_colors
+
+    # ------------------------------------------------------------------
+    # Group detection → groups[] for vertical reflow
+    # ------------------------------------------------------------------
+    groups = _detect_groups(blocks, topo_result)
 
     # ------------------------------------------------------------------
     # snap_map — Y-axis clustering alignment
@@ -147,6 +324,7 @@ def _plan_page(
         "cells":         cells,
         "snap_map":      snap_map,
         "title_indices": title_indices,
+        "groups":        groups,
     }
 
 

@@ -46,6 +46,33 @@
             "type": "array",
             "items": { "type": "integer" },
             "description": "Indices into cells[] that are titles."
+          },
+          "groups": {
+            "type": "array",
+            "description": "Block reflow groups for vertical reflow. Each block appears in exactly one group. Optional — layout_agent checks for existence before applying reflow.",
+            "items": {
+              "type": "object",
+              "required": ["block_indices", "anchor", "region_bbox"],
+              "properties": {
+                "block_indices": {
+                  "type": "array",
+                  "description": "0-based indices into the page's blocks[] array (same order as cells[]).",
+                  "items": { "type": "integer", "minimum": 0 }
+                },
+                "anchor": {
+                  "type": "array",
+                  "description": "[x0, y0] top-left corner of the topmost block in the group.",
+                  "items": { "type": "number" },
+                  "minItems": 2, "maxItems": 2
+                },
+                "region_bbox": {
+                  "type": "array",
+                  "description": "Bounding box [x0, y0, x1, y1] enclosing all blocks in the group.",
+                  "items": { "type": "number" },
+                  "minItems": 4, "maxItems": 4
+                }
+              }
+            }
           }
         }
       }
