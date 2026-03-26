@@ -237,10 +237,14 @@ _NEWLINE_PLACEHOLDER = "⏎"
 _BULLET_RE = re.compile(
     r'^[\s]*'           # optional leading whitespace
     r'(?:'
-    r'[•■\-–·\*▶▷►▸◆◇○●]'   # common bullet characters
-    r'|\d+[.\)）]'              # numbered list: 1. 2) 3）
+    r'[•■\-–·\*▶▷►▸◆◇○●→⇒★※]'  # common bullet characters + consequence arrows + section starters
+    r'|【'                          # bracketed headers like 【概要】
+    r'|\d+[.\)）]'                  # numbered list: 1. 2) 3）
     r')'
 )
+
+# Sentence-final punctuation that signals a semantic paragraph boundary
+_SENTENCE_FINAL_RE = re.compile(r'[。！？]\s*$')
 
 
 def _clean_layout_breaks(text: str) -> str:
@@ -250,9 +254,11 @@ def _clean_layout_breaks(text: str) -> str:
     column widths.  These are *not* semantic paragraph breaks and should be
     collapsed before translation so the LLM sees fluent sentences.
 
-    A newline is considered **semantic** (and kept) when the *next* line starts
-    with a bullet marker or numbered-list prefix.  All other newlines are
-    replaced with a single space.
+    A newline is considered **semantic** (and kept) when:
+    - the *next* line starts with a bullet marker / numbered-list prefix, OR
+    - the *previous* line ends with Japanese sentence-final punctuation (。！？).
+
+    All other newlines are replaced with a single space.
     """
     if "\n" not in text:
         return text
@@ -260,14 +266,16 @@ def _clean_layout_breaks(text: str) -> str:
     lines = text.split("\n")
     result = [lines[0]]
     for i in range(1, len(lines)):
-        if _BULLET_RE.match(lines[i]):
+        prev_line = lines[i - 1]
+        curr_line = lines[i]
+        if _BULLET_RE.match(curr_line) or _SENTENCE_FINAL_RE.search(prev_line):
             # Semantic break — keep the newline
             result.append("\n")
-            result.append(lines[i])
+            result.append(curr_line)
         else:
             # Layout wrap — replace with space
             result.append(" ")
-            result.append(lines[i])
+            result.append(curr_line)
     return "".join(result)
 
 

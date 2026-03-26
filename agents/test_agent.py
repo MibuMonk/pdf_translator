@@ -538,9 +538,26 @@ def linebreak_consistency_check(translated_json_path: str) -> dict:
             if not text or not translated:
                 continue
 
+            # Problem A: skip purely decorative PUA blocks (e.g. glyph-based bullets)
+            if re.sub(r'[\ue000-\uf8ff\s]', '', text) == '':
+                continue
+
             total_checked += 1
 
-            orig_breaks = text.count("\n")
+            # Problem B: count only *semantic* newlines in original (same definition as
+            # _clean_layout_breaks in translate_agent) so layout-wrap \n that were
+            # legitimately removed don't trigger false-positive mismatches.
+            # A newline is semantic when the next line starts with a bullet/marker
+            # OR the previous line ends with sentence-final punctuation (。！？).
+            _sem_bullet = re.compile(
+                r'^[\s]*(?:[•■\-–·*▶▷►▸◆◇○●→⇒★※]|【|\d+[.\)）])'
+            )
+            _sent_final = re.compile(r'[。！？]\s*$')
+            orig_lines = text.split("\n")
+            orig_breaks = 0
+            for _li in range(1, len(orig_lines)):
+                if _sem_bullet.match(orig_lines[_li]) or _sent_final.search(orig_lines[_li - 1]):
+                    orig_breaks += 1
             trans_breaks = translated.count("\n")
 
             # Rule 1: missing_bullet_break
@@ -1545,8 +1562,12 @@ def fragmentation_check(translated_data) -> dict:
                 })
 
             # Rule 2: block A ends with • line, block B starts with • (split bullets)
+            # Guard: skip if block A's translated text does NOT end with sentence-final
+            # punctuation — truncated blocks have a trailing • that is part of ongoing
+            # content, not a completed bullet boundary.
+            _a_ends_sentence = bool(re.search(r'[。！？…]\s*$', a_text))
             if (a_text.rstrip().endswith("•") or a_text.rstrip().split("\n")[-1].lstrip().startswith("•")):
-                if b_text.lstrip().startswith("•") and same_column:
+                if b_text.lstrip().startswith("•") and same_column and _a_ends_sentence:
                     y_gap = b_y0 - a_y1
                     if y_gap < 30:
                         # Avoid duplicate if already reported by Rule 1
