@@ -13,5 +13,8 @@ testdata/*/work_ja/
 # Debug artifacts
 testdata/*/page*_fixed.png
 
+# Generated reports
+test_report.json
+
 # Secrets
 .env
