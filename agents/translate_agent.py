@@ -246,6 +246,16 @@ _BULLET_RE = re.compile(
 # Sentence-final punctuation that signals a semantic paragraph boundary
 _SENTENCE_FINAL_RE = re.compile(r'[。！？]\s*$')
 
+# Short CJK lines (≤12 chars containing CJK) are almost always distinct items
+# in tables/lists, not word-wrapped sentence fragments — keep their newlines
+_SHORT_CJK_RE = re.compile(r'[\u3040-\u9fff\uac00-\ud7af]')
+
+
+def _is_short_cjk_item(line: str) -> bool:
+    """Return True if line is a short CJK-containing phrase (≤12 stripped chars)."""
+    stripped = line.strip()
+    return len(stripped) <= 12 and bool(_SHORT_CJK_RE.search(stripped))
+
 
 def _clean_layout_breaks(text: str) -> str:
     """Replace layout-wrapping newlines with spaces, preserving semantic breaks.
@@ -268,7 +278,11 @@ def _clean_layout_breaks(text: str) -> str:
     for i in range(1, len(lines)):
         prev_line = lines[i - 1]
         curr_line = lines[i]
-        if _BULLET_RE.match(curr_line) or _SENTENCE_FINAL_RE.search(prev_line):
+        if (
+            _BULLET_RE.match(curr_line)
+            or _SENTENCE_FINAL_RE.search(prev_line)
+            or (_is_short_cjk_item(prev_line) and _is_short_cjk_item(curr_line))
+        ):
             # Semantic break — keep the newline
             result.append("\n")
             result.append(curr_line)
@@ -409,7 +423,13 @@ def _call_claude_translate(
         f"- 自然流畅，符合 {tgt_name} 母语者表达习惯\n"
         f"- 风格一致性：全文统一语气，避免正式与非正式体裁交替出现\n"
         + (
-            "- 日文特别要求：全文统一使用敬体（です・ます体），不与常体（だ・である体）混用\n"
+            (
+                "- 日文特别要求【强制】：本文档为报告/论文类型，全文必须统一使用**常体（だ・である調）**，严禁出现です・ます等敬体形式\n"
+                if "常体" in context_section else
+                "- 日文特别要求【强制】：本文档为演示文稿类型，全文必须统一使用**敬体（です・ます体）**，严禁与常体（だ・である体）混用\n"
+                if "敬体" in context_section else
+                "- 日文特别要求：选择一种文体（敬体或常体）并在全文统一使用，不得在同一文档中混用两种文体\n"
+            )
             if "日文" in tgt_name or "Japanese" in tgt_name or tgt_name == "ja" else
             "- 中文特别要求：保持正式语气，第二人称统一使用「您」，不与「你」混用\n"
             if "中文" in tgt_name or "Chinese" in tgt_name or tgt_name in ("zh", "zh-CN", "zh-TW") else
@@ -532,7 +552,7 @@ def _save_cache(cache: dict, cache_path: Path) -> None:
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
-def _extract_glossary(texts: list, src_name: str, tgt_name: str, max_terms: int = 30) -> str:
+def _extract_glossary(texts: list, src_name: str, tgt_name: str, max_terms: int = 40) -> str:
     """
     Pre-pass: extract key domain terms from source texts to build a consistent
     glossary that is injected into every translation batch prompt.
@@ -543,17 +563,28 @@ def _extract_glossary(texts: list, src_name: str, tgt_name: str, max_terms: int 
     if len(filtered) < 5:
         return ""
 
-    sample = filtered[:60]  # cap to avoid large prompt
+    # Sample from beginning, middle, and end to capture terminology spread across the doc
+    n = len(filtered)
+    if n <= 90:
+        sample = filtered
+    else:
+        # Take 40 from start, 30 from middle, 20 from end
+        mid_start = n // 3
+        end_start = 2 * n // 3
+        sample = filtered[:40] + filtered[mid_start:mid_start + 30] + filtered[end_start:end_start + 20]
     sample_text = "\n".join(f"- {t}" for t in sample)
 
     prompt = (
-        f"你是一位专业翻译顾问。请从以下 {src_name} 演示文稿文本片段中提取需要全文统一译名的关键技术术语和专有名词，"
-        f"并给出最合适的 {tgt_name} 译名。\n\n"
-        f"要求：\n"
-        f"- 只提取在文档中重要或易产生翻译歧义的关键术语（最多 {max_terms} 个）\n"
-        f"- 包括：专业概念、机构名称、政策名称、缩写词、行业术语\n"
-        f"- 不要提取：纯数字、标点、常见通用词\n"
-        f"- 输出格式：JSON 数组，每个元素 {{\"src\": \"原文\", \"tgt\": \"译文\"}}\n"
+        f"你是一位专业翻译顾问。请从以下 {src_name} 文档文本片段中提取关键技术术语，"
+        f"并给出在整个文档中应统一使用的 {tgt_name} 译名。\n\n"
+        f"**提取重点**：\n"
+        f"- 专业技术概念、缩写词、行业术语（有多种可能译法的优先提取）\n"
+        f"- 机构名称、政策名称、产品名称\n"
+        f"- 人机交互类、技术体验类、网络架构类复合术语\n"
+        f"- 不要提取：纯数字、标点、常见通用词（大、小、好、多等）\n\n"
+        f"**要求**：\n"
+        f"- 最多提取 {max_terms} 个术语\n"
+        f"- 输出格式：JSON 数组，每个元素 {{\"src\": \"原文\", \"tgt\": \"推荐译文\"}}\n"
         f"- 仅输出 JSON，不要其他文字\n\n"
         f"文本片段：\n{sample_text}"
     )
@@ -582,6 +613,42 @@ def _extract_glossary(texts: list, src_name: str, tgt_name: str, max_terms: int 
         return "\n".join(lines)
     except Exception as e:
         print(f"    [glossary] extraction failed: {e}", flush=True)
+        return ""
+
+
+def _detect_japanese_register(texts: list, src_name: str) -> str:
+    """
+    Determine the appropriate Japanese register (敬体/常体) for the document.
+    Returns a short instruction string to inject into the translation context.
+    Returns "" on failure.
+    Only called when target is Japanese.
+    """
+    filtered = [t for t in texts if len(t.strip()) >= 15]
+    if len(filtered) < 3:
+        return ""
+    sample_text = "\n".join(f"- {t}" for t in filtered[:20])
+    prompt = (
+        f"以下は {src_name} の文書テキストサンプルです。\n"
+        f"この文書を日本語に翻訳する際、どの文体が適切ですか？\n"
+        f"- 「report」: 論文・報告書・ホワイトペーパー（常体：だ・である調）\n"
+        f"- 「slides」: プレゼンテーション・スライド（敬体：です・ます調）\n"
+        f"文書タイプのみ1単語（reportまたはslides）で答えてください。\n\n"
+        f"テキストサンプル：\n{sample_text}"
+    )
+    try:
+        client = _make_client()
+        message = client.messages.create(
+            model=_get_model(),
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        doc_type = message.content[0].text.strip().lower()
+        if "report" in doc_type:
+            return "## 日本語文体指定\n- 本文書は論文・報告書スタイルです。全文統一して**常体（だ・である調）**で翻訳すること"
+        else:
+            return "## 日本語文体指定\n- 本文書はプレゼンテーション・スライドスタイルです。全文統一して**敬体（です・ます調）**で翻訳すること"
+    except Exception as e:
+        print(f"    [register] detection failed: {e}", flush=True)
         return ""
 
 
@@ -771,6 +838,15 @@ def main():
             context_text = (context_text + "\n\n" + glossary).strip() if context_text else glossary
         else:
             print("[glossary] no terms extracted (skipping)", flush=True)
+
+        # For Japanese target: detect appropriate register (常体 vs 敬体)
+        if args.tgt in ("ja", "japanese"):
+            print("[register] detecting appropriate Japanese register...", flush=True)
+            reg_note = _detect_japanese_register(all_source_texts, src_name_for_glossary)
+            if reg_note:
+                detected = "常体" if "常体" in reg_note else "敬体"
+                print(f"[register] detected: {detected}", flush=True)
+                context_text = (context_text + "\n\n" + reg_note).strip() if context_text else reg_note
     print()
 
     # Process page by page

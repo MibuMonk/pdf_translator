@@ -1710,8 +1710,14 @@ def _is_pure_ascii(text: str) -> bool:
     total = len(text)
     if total == 0:
         return True
-    ascii_count = sum(1 for c in text if '\x20' <= c <= '\x7e' or c in '\t\n\r')
-    if ascii_count / total >= 0.85 and not any('\u4e00' <= c <= '\u9fff' or
+    # Count fullwidth punctuation (（）【】「」、。…etc.) as ASCII-equivalent
+    # for the purpose of this check — they are decorative wrappers, not CJK content
+    _FULLWIDTH_PUNCT = frozenset('\uff08\uff09\u3010\u3011\u300c\u300d\u3001\u3002\u2026\uff0c\uff01\uff1f\uff1a\uff1b')
+    ascii_equiv_count = sum(
+        1 for c in text
+        if ('\x20' <= c <= '\x7e' or c in '\t\n\r' or c in _FULLWIDTH_PUNCT)
+    )
+    if ascii_equiv_count / total >= 0.85 and not any('\u4e00' <= c <= '\u9fff' or
                                                '\u3040' <= c <= '\u30ff' or
                                                '\uac00' <= c <= '\ud7af'
                                                for c in text):
