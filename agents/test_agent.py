@@ -1359,6 +1359,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
             for blk in page.get_text("dict")["blocks"]:
                 if blk.get("type") != 0:
                     continue
+                blk_id = blk.get("number")
                 pdf_lines = blk.get("lines", [])
                 for li in range(len(pdf_lines) - 1):
                     if num_split_per_page[page_num] >= NUM_SPLIT_PAGE_LIMIT:
@@ -1371,6 +1372,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
                     if _ABBR_TAIL.search(line_a) and _NUM_HEAD.match(line_b):
                         issues.append({
                             "page": page_num,
+                            "block_id": blk_id,
                             "type": "number_unit_split",
                             "severity": "warning",
                             "split_at": f"...{line_a[-8:]}\\n{line_b[:8]}...",
@@ -1385,6 +1387,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
                         if len(head_word) <= 5 and not head_word.isupper():
                             issues.append({
                                 "page": page_num,
+                                "block_id": blk_id,
                                 "type": "number_unit_split",
                                 "severity": "warning",
                                 "split_at": f"...{line_a[-8:]}\\n{line_b[:8]}...",
@@ -1473,17 +1476,13 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
 def _collect_spans_in_bbox(spans, bbox, tolerance=5.0):
     """Collect all PDF spans whose bbox overlaps with the target bbox."""
     tx0, ty0, tx1, ty1 = bbox
-    matched = []
-    for span in spans:
-        sx0, sy0, sx1, sy1 = span["bbox"]
-        # Check overlap: span must be within the vertical range and
-        # have some horizontal overlap with the target bbox
-        if sy1 < ty0 - tolerance or sy0 > ty1 + tolerance:
-            continue
-        if sx1 < tx0 - tolerance or sx0 > tx1 + tolerance:
-            continue
-        matched.append(span)
-    return matched
+    return [
+        span for span in spans
+        if not (span["bbox"][3] < ty0 - tolerance
+                or span["bbox"][1] > ty1 + tolerance
+                or span["bbox"][2] < tx0 - tolerance
+                or span["bbox"][0] > tx1 + tolerance)
+    ]
 
 
 def glyph_dropout_check(translated_json_path: str, pdf_path: str) -> dict:
