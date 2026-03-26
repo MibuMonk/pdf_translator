@@ -1012,6 +1012,7 @@ def render_page(
     overflow_expanded = [False] * len(fitting_sizes)  # track which blocks were expanded
     for i in range(len(fitting_sizes)):
         if fitting_sizes[i] < _READABILITY_FLOOR and translated_texts[i].strip():
+            original_bbox = insert_bboxes[i]   # save before expansion
             expanded = _overflow_expand(
                 i, insert_bboxes, translated_texts[i], _READABILITY_FLOOR,
                 aligns[i], visual, page_rect,
@@ -1027,7 +1028,9 @@ def render_page(
                 fitting_sizes[i] = _READABILITY_FLOOR
                 overflow_expanded[i] = True
             else:
-                # Expansion was insufficient — use the best size that fits
+                # Expansion was insufficient — revert bbox to prevent drift,
+                # then use the best size that fits.
+                insert_bboxes[i] = original_bbox  # revert — expansion didn't help
                 fitting_sizes[i] = verify_size
 
     # ------------------------------------------------------------------
