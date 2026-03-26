@@ -407,7 +407,15 @@ def _call_claude_translate(
         f"**幻灯片语言风格**\n"
         f"- 简洁精炼，避免冗长；标题类文本尤其要简短有力\n"
         f"- 自然流畅，符合 {tgt_name} 母语者表达习惯\n"
-        f"{context_block}\n"
+        f"- 风格一致性：全文统一语气，避免正式与非正式体裁交替出现\n"
+        + (
+            "- 日文特别要求：全文统一使用敬体（です・ます体），不与常体（だ・である体）混用\n"
+            if "日文" in tgt_name or "Japanese" in tgt_name or tgt_name == "ja" else
+            "- 中文特别要求：保持正式语气，第二人称统一使用「您」，不与「你」混用\n"
+            if "中文" in tgt_name or "Chinese" in tgt_name or tgt_name in ("zh", "zh-CN", "zh-TW") else
+            ""
+        )
+        + f"{context_block}\n"
         f"## 输入格式\n"
         f"JSON 数组，每个元素有 id 和 text 字段。\n\n"
         f"## 输出格式\n"
