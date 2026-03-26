@@ -421,6 +421,9 @@ def translation_completeness_check(translated_json_path: str) -> dict:
     issues: list[dict] = []
     page_ratios: list[dict] = []
 
+    # Read target language for _is_target_language check
+    tgt_lang = data.get("target_lang", "") if isinstance(data, dict) else ""
+
     for page_entry in pages:
         if not isinstance(page_entry, dict):
             continue
@@ -443,6 +446,11 @@ def translation_completeness_check(translated_json_path: str) -> dict:
             # Skip trivially-invariant content (numbers, symbols) from ratio;
             # these are correctly left unchanged and should not penalise the score.
             if _is_trivially_invariant(text):
+                continue
+
+            # Skip content already in the target language (e.g. English terms in
+            # a Chinese→English document are correctly left unchanged).
+            if tgt_lang and _is_target_language(text, tgt_lang):
                 continue
 
             total_chars += len(text)
@@ -1570,6 +1578,24 @@ _ACRONYM_DEF_RE = re.compile(r'^[A-Z]{2,}[0-9A-Z]*[\s\n]*[\(:]')
 # Matches strings that contain ONLY ASCII-range characters (letters, digits,
 # punctuation, spaces).  No CJK, kana, hangul, or other non-ASCII scripts.
 _PURE_ASCII_RE = re.compile(r'^[\x20-\x7E\t\n\r]*$')
+
+
+def _is_target_language(text: str, tgt: str) -> bool:
+    """Check if text is predominantly already in the target language."""
+    clean = re.sub(r'[^\w\s]', '', text, flags=re.UNICODE).strip()
+    if not clean:
+        return False
+    if tgt == 'en':
+        latin = len(re.findall(r'[a-zA-Z]', clean))
+        total = len(re.findall(r'\S', clean))
+        return total > 0 and latin / total > 0.5
+    elif tgt == 'ja':
+        return bool(re.search(r'[\u3040-\u30ff]', clean))
+    elif tgt.startswith('zh'):
+        has_cjk = bool(re.search(r'[\u4e00-\u9fff]', clean))
+        has_kana = bool(re.search(r'[\u3040-\u30ff]', clean))
+        return has_cjk and not has_kana
+    return False
 
 
 def _is_trivially_invariant(text: str) -> bool:
