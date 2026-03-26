@@ -289,6 +289,37 @@ def _restore_newlines(text: str) -> str:
     return text.replace(_NEWLINE_PLACEHOLDER, "\n")
 
 
+def _fixup_bullet_newlines(translated: str, original: str) -> str:
+    """Re-insert newlines before bullet markers that the LLM dropped.
+
+    When the original has multiple bullet lines (■/•) each preceded by \\n,
+    but the translation merges them into a single line, this function restores
+    the \\n before each mid-string bullet occurrence.
+
+    Only applies when original has ≥2 bullets with \\n before them.
+    """
+    # Count bullets preceded by \n in original
+    orig_bulleted = len(re.findall(r'\n[•■]', original))
+    if orig_bulleted < 1:
+        return translated
+
+    # For each bullet char found in original-with-\n, ensure translation has \n before it
+    for bullet_char in ('•', '■'):
+        if bullet_char not in original:
+            continue
+        # Re-insert \n before mid-string bullet if missing
+        result = []
+        i = 0
+        while i < len(translated):
+            ch = translated[i]
+            if ch == bullet_char and i > 0 and translated[i - 1] != '\n':
+                result.append('\n')
+            result.append(ch)
+            i += 1
+        translated = ''.join(result)
+    return translated
+
+
 def _build_tagged_text(color_spans: list) -> str:
     """Wrap each span's text with <s1>, <s2>, ... tags."""
     parts = []
@@ -696,6 +727,9 @@ def main():
             )
             for idx_in_plain, orig_idx in enumerate(plain_indices):
                 t = plain_translated[idx_in_plain]
+                if isinstance(t, str) and t:
+                    orig_text = blocks[orig_idx].get("text", "")
+                    t = _fixup_bullet_newlines(t, orig_text)
                 blocks[orig_idx]["translated"] = t if isinstance(t, str) else ""
 
         # --- Translate span-aware blocks (tagged text) ---

@@ -597,7 +597,11 @@ def linebreak_consistency_check(translated_json_path: str) -> dict:
                     start = pos + 1
 
             # Rule 2: linebreak_count_mismatch
-            if orig_breaks > 0 and trans_breaks < orig_breaks / 2:
+            # Skip if block already has a Rule 1 error (avoid duplicate reporting)
+            _block_already_flagged = any(
+                i["block_id"] == block_id and i["severity"] == "error" for i in issues
+            )
+            if orig_breaks > 0 and trans_breaks < orig_breaks / 2 and not _block_already_flagged:
                 issues.append({
                     "page": page_num,
                     "block_id": block_id,
@@ -665,16 +669,35 @@ def mixed_language_check(translated_json_path: str) -> dict:
     Detect blocks where translated text still contains untranslated English phrases.
     - untranslated_heading: ■/• followed by English word (severity: error)
     - english_phrase_in_translation: 3+ consecutive English words in CJK text (severity: warning)
+
+    Skipped entirely when target language is a Latin script language (en, de, fr, es, …)
+    since all English in the translation is expected.
     """
     with open(translated_json_path, encoding="utf-8") as f:
         data = json.load(f)
 
     if isinstance(data, list):
         pages = data
+        target_lang = ""
     elif isinstance(data, dict):
         pages = data.get("pages", [data])
+        target_lang = data.get("target_lang", "")
     else:
         return {"check_result": "fail", "details": {"issues": [], "total_checked": 0, "blocks_with_mixed_language": 0}}
+
+    # Skip this check for Latin-script target languages — English phrases are expected
+    _latin_targets = {"english", "en", "german", "french", "spanish", "portuguese",
+                      "italian", "dutch", "russian", "polish", "arabic"}
+    if target_lang.lower() in _latin_targets:
+        return {
+            "check_result": "pass",
+            "details": {
+                "issues": [],
+                "total_checked": 0,
+                "blocks_with_mixed_language": 0,
+                "skipped_reason": f"target_lang={target_lang!r} is not a CJK language",
+            },
+        }
 
     issues: list[dict] = []
     total_checked = 0
@@ -732,7 +755,12 @@ def mixed_language_check(translated_json_path: str) -> dict:
                 })
 
             # Rule 2: english_phrase_in_translation — 3+ consecutive English words in CJK text
-            if not has_cjk(translated):
+            # Gate: require actual CJK ideographs or kana (not just CJK punctuation like 【】)
+            # Fullwidth brackets 【U+3010/3011】 are in has_cjk range but don't indicate CJK text
+            _has_cjk_ideograph = bool(re.search(
+                r'[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]', translated
+            ))
+            if not _has_cjk_ideograph:
                 continue  # Not a CJK translation, skip phrase check
 
             # Remove parenthesised content before scanning
@@ -994,10 +1022,18 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
 
     if isinstance(data, list):
         pages = data
+        target_lang = ""
     elif isinstance(data, dict):
         pages = data.get("pages", [data])
+        target_lang = data.get("target_lang", "")
     else:
         return {"check_result": "fail", "details": [{"error": "Unexpected JSON structure"}]}
+
+    # Latin-target translations (en, de, fr, es, ...) use narrower characters (~0.5em wide).
+    # The capacity formula assumes CJK square chars; for Latin targets, multiply by 2.
+    _latin_targets = {"english", "en", "german", "french", "spanish", "portuguese",
+                      "italian", "dutch", "russian", "polish", "arabic"}
+    _capacity_factor = 2.0 if target_lang.lower() in _latin_targets else 1.0
 
     # Extract actual rendered spans from PDF
     pdf_spans = extract_pdf_spans_by_page(Path(pdf_path))
@@ -1071,7 +1107,7 @@ def readability_check(translated_json_path: str, pdf_path: str, source_pdf_path:
                     # chart annotations where truncation is unavoidable.
                     if area < 500:
                         continue
-                    estimated_capacity = area / (effective_size * effective_size)
+                    estimated_capacity = area / (effective_size * effective_size) * _capacity_factor
                     # Use weighted length for fair comparison
                     text_weight = _weighted_len(translated)
                     if estimated_capacity > 0:
@@ -1448,7 +1484,12 @@ def glyph_dropout_check(translated_json_path: str, pdf_path: str) -> dict:
             def _normalize(s):
                 s = unicodedata.normalize("NFC", s)
                 # Remove all whitespace
-                return re.sub(r'\s+', '', s)
+                s = re.sub(r'\s+', '', s)
+                # Strip invisible/zero-width Unicode chars that PDF rendering won't extract
+                # (WORD JOINER U+2060, ZERO WIDTH SPACE U+200B, ZERO WIDTH JOINER U+200D,
+                #  ZERO WIDTH NON-JOINER U+200C, BOM U+FEFF, soft hyphen U+00AD)
+                s = re.sub(r'[\u00ad\u200b-\u200d\u2060\ufeff]', '', s)
+                return s
 
             norm_translated = _normalize(translated)
             norm_rendered = _normalize(rendered_text)
@@ -1660,7 +1701,21 @@ def _is_pure_ascii(text: str) -> bool:
     Returns False if the text contains ANY CJK, kana, hangul, or other
     non-ASCII characters — those blocks should still be checked.
     """
-    return bool(_PURE_ASCII_RE.match(text))
+    if bool(_PURE_ASCII_RE.match(text)):
+        return True
+    # "Mostly ASCII": >85% of chars are ASCII printable + only non-CJK non-Latin
+    # symbols make up the rest (e.g. ±×°µ in technical metrics).
+    # These are effectively technical identifiers and should not be flagged.
+    total = len(text)
+    if total == 0:
+        return True
+    ascii_count = sum(1 for c in text if '\x20' <= c <= '\x7e' or c in '\t\n\r')
+    if ascii_count / total >= 0.85 and not any('\u4e00' <= c <= '\u9fff' or
+                                               '\u3040' <= c <= '\u30ff' or
+                                               '\uac00' <= c <= '\ud7af'
+                                               for c in text):
+        return True
+    return False
 
 
 def _weighted_len(text: str) -> float:
