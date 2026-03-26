@@ -788,6 +788,9 @@ def main():
                     # Fallback: strip any leftover tags and use as plain translation
                     plain_text = re.sub(r'</?s\d+>', '', raw_translation)
                     block["translated"] = plain_text
+                # Apply bullet newline fixup for both paths
+                orig_text = block.get("text", "")
+                block["translated"] = _fixup_bullet_newlines(block["translated"], orig_text)
 
     # Ensure every block that was not processed also has a `translated` field
     for page in pages:

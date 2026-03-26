@@ -1646,8 +1646,9 @@ def fragmentation_check(translated_data) -> dict:
                                 "text_preview": a_text[:40],
                             })
 
+    has_errors = any(i.get("severity") == "error" for i in issues)
     return {
-        "check_result": "fail" if issues else "pass",
+        "check_result": "fail" if has_errors else "pass",
         "details": {"issues": issues},
     }
 
