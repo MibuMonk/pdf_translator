@@ -1979,10 +1979,13 @@ def style_check(translated_json_path: str) -> dict:
     if not page_lines:
         return {"check_result": "pass", "details": {"style_issues": []}}
 
-    # Sampling for large documents: >50 pages -> first 30 + last 10
+    # Sampling: cap to at most 30 pages spread across the document
+    # (first 15, last 10, and 5 from middle) to avoid exceeding LLM output limits
     all_page_nums = sorted(set(pn for pn, _ in page_lines))
-    if len(all_page_nums) > 50:
-        keep_pages = set(all_page_nums[:30] + all_page_nums[-10:])
+    if len(all_page_nums) > 30:
+        n = len(all_page_nums)
+        mid_pages = all_page_nums[n // 3: n // 3 + 5]
+        keep_pages = set(all_page_nums[:15] + mid_pages + all_page_nums[-10:])
         page_lines = [(pn, t) for pn, t in page_lines if pn in keep_pages]
 
     # Build the text payload
@@ -2018,13 +2021,16 @@ def style_check(translated_json_path: str) -> dict:
         client = _make_client()
         message = client.messages.create(
             model=_get_model(),
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
         # Strip markdown fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
+        # Attempt to close truncated JSON (if LLM output was cut off)
+        if not raw.rstrip().endswith("}"):
+            raw = raw.rstrip().rstrip(",") + "\n]}"
         style_result = json.loads(raw)
     except (json.JSONDecodeError, Exception) as e:
         return {
