@@ -532,6 +532,59 @@ def _save_cache(cache: dict, cache_path: Path) -> None:
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
+def _extract_glossary(texts: list, src_name: str, tgt_name: str, max_terms: int = 30) -> str:
+    """
+    Pre-pass: extract key domain terms from source texts to build a consistent
+    glossary that is injected into every translation batch prompt.
+    Returns a formatted string, or "" on failure.
+    """
+    # Filter to substantive texts (skip very short / trivial items)
+    filtered = [t for t in texts if len(t.strip()) >= 10]
+    if len(filtered) < 5:
+        return ""
+
+    sample = filtered[:60]  # cap to avoid large prompt
+    sample_text = "\n".join(f"- {t}" for t in sample)
+
+    prompt = (
+        f"你是一位专业翻译顾问。请从以下 {src_name} 演示文稿文本片段中提取需要全文统一译名的关键技术术语和专有名词，"
+        f"并给出最合适的 {tgt_name} 译名。\n\n"
+        f"要求：\n"
+        f"- 只提取在文档中重要或易产生翻译歧义的关键术语（最多 {max_terms} 个）\n"
+        f"- 包括：专业概念、机构名称、政策名称、缩写词、行业术语\n"
+        f"- 不要提取：纯数字、标点、常见通用词\n"
+        f"- 输出格式：JSON 数组，每个元素 {{\"src\": \"原文\", \"tgt\": \"译文\"}}\n"
+        f"- 仅输出 JSON，不要其他文字\n\n"
+        f"文本片段：\n{sample_text}"
+    )
+
+    try:
+        client = _make_client()
+        message = client.messages.create(
+            model=_get_model(),
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[^\n]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw.strip())
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            return ""
+        lines = ["## 文档专用术语表（全文须统一使用以下译名）"]
+        for item in items[:max_terms]:
+            if isinstance(item, dict) and item.get("src") and item.get("tgt"):
+                lines.append(f"- {item['src']} → {item['tgt']}")
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"    [glossary] extraction failed: {e}", flush=True)
+        return ""
+
+
 def translate_texts(
     texts: list,
     src: str,
@@ -699,6 +752,27 @@ def main():
     if isinstance(data, dict) and "version" not in data:
         data["version"] = "1.0"
 
+    # Document-level glossary pre-extraction for cross-batch consistency
+    # Collect all source texts to extract domain terminology before translation begins
+    src_name_for_glossary = SUPPORTED_LANGUAGES.get(args.src, args.src)
+    tgt_name_for_glossary = SUPPORTED_LANGUAGES.get(args.tgt, args.tgt)
+    all_source_texts = []
+    for page in pages:
+        for block in page.get("blocks", []):
+            t = block.get("text", "").strip()
+            if t and t not in cache:
+                all_source_texts.append(t)
+    if len(all_source_texts) >= 10:
+        print("[glossary] extracting domain terminology for cross-batch consistency...", flush=True)
+        glossary = _extract_glossary(all_source_texts, src_name_for_glossary, tgt_name_for_glossary)
+        if glossary:
+            term_count = len([l for l in glossary.splitlines() if l.startswith("-")])
+            print(f"[glossary] {term_count} terms extracted", flush=True)
+            context_text = (context_text + "\n\n" + glossary).strip() if context_text else glossary
+        else:
+            print("[glossary] no terms extracted (skipping)", flush=True)
+    print()
+
     # Process page by page
     for page_idx, page in enumerate(pages):
         blocks = page.get("blocks", [])
@@ -797,6 +871,11 @@ def main():
         for block in page.get("blocks", []):
             if "translated" not in block:
                 block["translated"] = ""
+
+    # Update language metadata to reflect actual translation direction
+    if isinstance(data, dict):
+        data["source_lang"] = args.src
+        data["target_lang"] = args.tgt
 
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)
