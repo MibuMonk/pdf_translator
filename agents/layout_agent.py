@@ -810,6 +810,26 @@ def render_page(
                 return True
         return False
 
+    def _get_background_fill(rect: fitz.Rect) -> Optional[tuple]:
+        """Return the fill color of the largest overlapping filled drawing, or None."""
+        rect_area = rect.width * rect.height
+        if rect_area <= 0:
+            return None
+        best_color = None
+        best_overlap = 0.0
+        for d in drawings:
+            if d.get("fill") is None or d.get("rect") is None:
+                continue
+            bg_rect = fitz.Rect(d["rect"])
+            inter = rect & bg_rect
+            if inter.is_empty:
+                continue
+            overlap = (inter.width * inter.height) / rect_area
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_color = d["fill"]
+        return best_color if best_overlap > 0.30 else None
+
     # ------------------------------------------------------------------
     # Step 1: Redact
     # Phase 3: for multi-block groups, redact the union bbox of all blocks
@@ -836,7 +856,12 @@ def render_page(
                 for bi in indices:
                     _group_union_bbox[bi] = union
 
-    # Track already-added union rects to avoid redundant annotations
+    # Step 1: Redact original text / cover with background color
+    # For blocks WITHOUT a colored background: use redact (fills with white)
+    # For blocks WITH a colored background: draw a same-color rect to cover
+    # the text without erasing the underlying vector graphics.
+    bg_cover_rects: list[tuple] = []  # (fitz.Rect, fill_color_tuple)
+
     _union_rects_added: set[tuple] = set()
     for blk_idx, block in enumerate(blocks):
         if blk_idx in _group_union_bbox:
@@ -844,19 +869,29 @@ def render_page(
             key = (union_r.x0, union_r.y0, union_r.x1, union_r.y1)
             if key not in _union_rects_added:
                 _union_rects_added.add(key)
-                if _has_background_overlap(union_r):
-                    page.add_redact_annot(union_r, fill=None)
+                bg_fill = _get_background_fill(union_r)
+                if bg_fill is not None:
+                    bg_cover_rects.append((union_r, bg_fill))
                 else:
                     page.add_redact_annot(union_r)
         else:
             for rb in block.get("redact_bboxes", []):
                 r = fitz.Rect(rb)
-                if _has_background_overlap(r):
-                    # Transparent fill: removes text but preserves background (REQ-1)
-                    page.add_redact_annot(r, fill=None)
+                bg_fill = _get_background_fill(r)
+                if bg_fill is not None:
+                    bg_cover_rects.append((r, bg_fill))
                 else:
                     page.add_redact_annot(r)
+
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+    # Draw background-color covers after redaction (order matters: drawings
+    # written here appear above the redacted layer but below inserted text)
+    shape = page.new_shape()
+    for cover_rect, fill_color in bg_cover_rects:
+        shape.draw_rect(cover_rect)
+        shape.finish(fill=fill_color, color=None, width=0)
+    shape.commit()
 
     # ------------------------------------------------------------------
     # Step 2: Pre-process translated texts
