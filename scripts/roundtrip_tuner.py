@@ -221,11 +221,11 @@ def main():
 
     for iter_num in range(args.max_iters):
         print(f'\n=== Iteration {iter_num + 1} ===')
-        # First iteration always does full eval; subsequent use layout_only
+        # Use layout_only on iter 1+; force=False so cached PDFs (rt_B.pdf) are always reused
         use_layout_only = (iter_num > 0)
         report = run_eval(pdf_path, lang_a, lang_b, work_dir,
                           alpha=0.4, beta=0.6,
-                          force=(not use_layout_only),
+                          force=False,
                           layout_only=use_layout_only)
         score = report['summary']['score']
         print(f'Score: {score:.4f}')
