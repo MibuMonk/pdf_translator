@@ -245,7 +245,7 @@ def _run_identity(pdf_path: Path, work_dir: Path, pages=None) -> Path:
     _run([sys.executable, str(agents_dir / "consolidator.py"), "--input", str(parsed_json)])
     _create_identity_translated_json(parsed_json, translated_json)
     _run([sys.executable, str(agents_dir / "space_planner.py"),
-          "--input", str(pdf_path), "--json", str(parsed_json),
+          "--input", str(pdf_path), "--parsed", str(parsed_json),
           "--output", str(layout_plan)])
     _run([sys.executable, str(agents_dir / "layout_agent.py"),
           "--input", str(pdf_path), "--json", str(translated_json),
