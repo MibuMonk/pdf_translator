@@ -317,10 +317,12 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
     color_mismatch_pct = color_mismatch / matched * 100 if matched else 0.0
     line_overflow_pct = line_overflow / matched * 100 if matched else 0.0
 
+    orphan_rt_rate = total_orphan_rt / (matched + total_orphan_rt) if (matched + total_orphan_rt) > 0 else 0.0
     score = 1.0 - (
-        0.4 * color_mismatch_pct / 100
-        + 0.4 * line_overflow_pct / 100
-        + 0.2 * min(abs(avg_fsd) / 20, 1.0)
+        0.3 * color_mismatch_pct / 100
+        + 0.3 * line_overflow_pct / 100
+        + 0.1 * min(abs(avg_fsd) / 20, 1.0)
+        + 0.3 * orphan_rt_rate
     )
     score = max(0.0, min(1.0, score))
 
@@ -342,6 +344,7 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
             'line_overflow_pct': line_overflow_pct,
             'avg_line_delta': avg_line_delta,
             'avg_font_size_delta_pct': avg_fsd,
+            'orphan_rt_rate': orphan_rt_rate,
             'avg_match_cost': avg_cost,
             'score': score,
         },
@@ -367,6 +370,7 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
     print(f'  Line overflow   : {s["line_overflow_count"]} ({s["line_overflow_pct"]:.1f}%)')
     print(f'  Avg line delta  : {s["avg_line_delta"]:+.2f}')
     print(f'  Avg font \u0394      : {s["avg_font_size_delta_pct"]:+.1f}%')
+    print(f'  Orphan RT rate  : {s["orphan_rt_rate"]:.1%}')
     print(f'  Avg match cost  : {s["avg_match_cost"]:.4f}')
     print(f'  SCORE           : {s["score"]:.4f}')
     print(f'  Report saved to : {report_path}')
