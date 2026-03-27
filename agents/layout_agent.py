@@ -631,7 +631,10 @@ def _merge_adjacent_blocks(
     bboxes: list,
     font_sizes: list,
 ) -> tuple:
-    """Merge vertically adjacent blocks with x-overlap > 30% and y-gap < 6px.
+    """Merge adjacent blocks that are close enough vertically and share x-overlap.
+
+    Also merges same-line (y-overlapping) blocks that are horizontally adjacent,
+    which catches fragment orphans like single-word labels split from a larger block.
 
     Returns new (translated_texts, bboxes, font_sizes).
     """
@@ -654,15 +657,25 @@ def _merge_adjacent_blocks(
                 if used[j]:
                     continue
                 bj = bboxes[j]
-                y_gap = abs(bj.y0 - bi.y1)
-                if y_gap >= _Y_GAP_MERGE:
+                # Actual bounding-box separation (0 when overlapping or touching)
+                y_sep = max(0.0, max(bi.y0, bj.y0) - min(bi.y1, bj.y1))
+                if y_sep >= _Y_GAP_MERGE:
                     continue
                 # x overlap ratio relative to the narrower block
                 x_overlap = min(bi.x1, bj.x1) - max(bi.x0, bj.x0)
                 min_width = min(bi.width, bj.width)
                 if min_width <= 0:
                     continue
-                if x_overlap / min_width > _X_OVERLAP_RATIO:
+                # For same-line blocks (y_sep < 2px), also accept horizontal adjacency
+                # (x_sep < _Y_GAP_MERGE) to catch fragment orphans split side-by-side.
+                # Table cells are excluded because they typically have x_sep > 60px.
+                same_line = y_sep < 2.0
+                x_sep = max(0.0, max(bi.x0, bj.x0) - min(bi.x1, bj.x1))
+                passes_x = (
+                    x_overlap / min_width > _X_OVERLAP_RATIO
+                    or (same_line and x_sep < _Y_GAP_MERGE)
+                )
+                if passes_x:
                     # Merge j into i
                     ti = ti + "\n" + translated_texts[j]
                     bi = fitz.Rect(
