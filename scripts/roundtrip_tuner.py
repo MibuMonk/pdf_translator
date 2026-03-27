@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +86,14 @@ def print_diagnosis_prompt(report: dict, target_score: float):
         )
         print(f'   Examples: {examples}')
         print()
+    # 4. orphan_rt
+    orphan_rt_rate = s.get('orphan_rt_rate', 0.0)
+    if orphan_rt_rate > 0.2:
+        issue_num += 1
+        print(f'{issue_num}. orphan_rt_rate: {orphan_rt_rate:.1%} of rt blocks unmatched '
+              f'\u2014 text expansion creates blocks with no original counterpart')
+        print()
+
 
     print('LAYOUT AGENT FILE: agents/layout_agent.py')
     print('Analyze the above issues and propose specific code fixes.')
@@ -122,6 +131,62 @@ def _print_history_table(history: list):
 # Main
 # ---------------------------------------------------------------------------
 
+def _auto_fix(report: dict, target_score: float, work_dir: Path):
+    """Dispatch claude CLI to auto-fix layout_agent.py based on diagnosis."""
+    import shutil as shutil_inner
+    project_root = Path(__file__).resolve().parent.parent
+    layout_agent_path = project_root / 'agents' / 'layout_agent.py'
+
+    claude_bin = shutil_inner.which('claude') or 'claude'
+
+    s = report['summary']
+    score = s['score']
+    orphan_rt_rate = s.get('orphan_rt_rate', 0.0)
+    line_overflow_pct = s.get('line_overflow_pct', 0.0)
+    color_mismatch_pct = s.get('color_mismatch_pct', 0.0)
+
+    # Build worst-cases string from top matches by match_cost
+    worst = report.get('worst_blocks', [])[:5]
+    worst_str = '\n'.join(
+        f"  page {m['page']}: orig={m['orig_text'][:40]!r} rt={m['rt_text'][:40]!r} "
+        f"line_delta={m['line_delta']:+d} color_match={m['color_match']}"
+        for m in worst
+    )
+
+    prompt = f"""You are a layout fixer for the PDF translation pipeline at {project_root}.
+
+TASK: Fix agents/layout_agent.py to improve the round-trip layout score.
+
+Current score: {score:.4f} (target: {target_score})
+
+TOP ISSUES:
+- line_overflow: {line_overflow_pct:.1f}% of matched blocks have more lines than original
+- color_mismatch: {color_mismatch_pct:.1f}% of matched blocks have wrong text color
+- orphan_rt_rate: {orphan_rt_rate:.1%} of rt blocks are unmatched (text expansion creates extra blocks)
+
+WORST BLOCKS (highest match cost):
+{worst_str}
+
+INSTRUCTIONS:
+1. Read agents/layout_agent.py carefully
+2. Identify the root cause of the top issues listed above
+3. Make minimal, targeted fixes \u2014 do not refactor unrelated code
+4. Focus on: font shrinking to fit text, color preservation, line wrapping logic
+5. Do NOT change the I/O interface or agent contract
+
+Working directory: {project_root}
+"""
+
+    print(f'\n[auto] Calling claude to fix layout_agent.py ...')
+    result = subprocess.run(
+        [claude_bin, '--dangerously-skip-permissions', '-p', prompt],
+        cwd=str(project_root),
+        timeout=600,
+    )
+    if result.returncode != 0:
+        print(f'[auto] claude returned exit code {result.returncode}, continuing...')
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Iterative round-trip layout tuner'
@@ -133,6 +198,8 @@ def main():
     parser.add_argument('--max-iters', type=int, default=10, help='Max iterations (default: 10)')
     parser.add_argument('--target-score', type=float, default=0.90,
                         help='Target score to stop at (default: 0.90)')
+    parser.add_argument('--auto', action='store_true', default=False,
+                        help='Automatically call claude CLI to fix layout_agent.py each iteration')
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf_path).resolve()
@@ -154,10 +221,14 @@ def main():
 
     for iter_num in range(args.max_iters):
         print(f'\n=== Iteration {iter_num + 1} ===')
+        # First iteration always does full eval; subsequent use layout_only
+        use_layout_only = (iter_num > 0)
         report = run_eval(pdf_path, lang_a, lang_b, work_dir,
-                          alpha=0.4, beta=0.6, force=True)
+                          alpha=0.4, beta=0.6,
+                          force=(not use_layout_only),
+                          layout_only=use_layout_only)
         score = report['summary']['score']
-        print(f'Score: {score:.3f}')
+        print(f'Score: {score:.4f}')
 
         history.append({
             'iter': iter_num + 1,
@@ -171,12 +242,16 @@ def main():
             break
 
         print_diagnosis_prompt(report, args.target_score)
-        try:
-            resp = input('\nContinue to next iteration after fixing? [y/n]: ')
-        except EOFError:
-            break
-        if resp.lower() != 'y':
-            break
+
+        if args.auto:
+            _auto_fix(report, args.target_score, work_dir)
+        else:
+            try:
+                resp = input('\nContinue to next iteration after fixing? [y/n]: ')
+            except EOFError:
+                break
+            if resp.lower() != 'y':
+                break
 
     _print_history_table(history)
 

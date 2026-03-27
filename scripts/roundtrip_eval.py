@@ -211,6 +211,27 @@ def match_page(orig_blocks, rt_blocks, alpha, beta, sim_cache):
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
+def _run_layout_only(rt_b_pdf: Path, work_ba_dir: Path, lang_a: str, rt_a_pdf: Path):
+    """Re-run only layout_agent using cached translated.json + layout_plan.json."""
+    translated_json = work_ba_dir / f'{rt_b_pdf.stem}.translated.json'
+    layout_plan_json = work_ba_dir / 'layout_plan.json'
+    if not translated_json.exists():
+        raise FileNotFoundError(f'Missing cached translated.json: {translated_json}')
+    agents_dir = Path(__file__).resolve().parent.parent / 'agents'
+    cmd = [
+        sys.executable,
+        str(agents_dir / 'layout_agent.py'),
+        '--input', str(rt_b_pdf),
+        '--json',  str(translated_json),
+        '--output', str(rt_a_pdf),
+        '--tgt',   lang_a,
+    ]
+    if layout_plan_json.exists():
+        cmd += ['--plan', str(layout_plan_json)]
+    print(f'  [layout-only] {" ".join(cmd)}')
+    subprocess.run(cmd, check=True)
+
+
 def _run_pipeline(input_pdf: Path, src: str, tgt: str, output_pdf: Path,
                   workdir: Path, cache: Path):
     pipeline_path = Path(__file__).resolve().parent.parent / 'run_pipeline.py'
@@ -233,7 +254,7 @@ def _run_pipeline(input_pdf: Path, src: str, tgt: str, output_pdf: Path,
 # Main evaluation function (importable)
 # ---------------------------------------------------------------------------
 
-def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=False):
+def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=False, layout_only=False):
     """
     Run full round-trip evaluation and return the report dict.
     Also writes <work_dir>/roundtrip_report.json.
@@ -246,19 +267,25 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
     rt_a_pdf = work_dir / 'rt_A.pdf'
 
     # Step 1 \u2014 A\u2192B
-    if force or not rt_b_pdf.exists():
-        print(f'[Step 1] Translating {lang_a}\u2192{lang_b} ...')
-        _run_pipeline(
-            pdf_path, lang_a, lang_b,
-            rt_b_pdf,
-            work_dir / 'work_AB',
-            work_dir / 'AB.transcache.json',
-        )
-    else:
-        print(f'[Step 1] Skipping A\u2192B (rt_B.pdf exists, use --force to re-run)')
+    if not layout_only:
+        if force or not rt_b_pdf.exists():
+            print(f'[Step 1] Translating {lang_a}\u2192{lang_b} ...')
+            _run_pipeline(
+                pdf_path, lang_a, lang_b,
+                rt_b_pdf,
+                work_dir / 'work_AB',
+                work_dir / 'AB.transcache.json',
+            )
+        else:
+            print(f'[Step 1] Skipping A\u2192B (rt_B.pdf exists, use --force to re-run)')
 
     # Step 2 \u2014 B\u2192A
-    if force or not rt_a_pdf.exists():
+    if layout_only:
+        if not rt_b_pdf.exists():
+            raise FileNotFoundError('rt_B.pdf not found \u2014 run full eval first before using layout_only=True')
+        print(f'[Step 2] Re-running layout only ({lang_b}\u2192{lang_a}) ...')
+        _run_layout_only(rt_b_pdf, work_dir / 'work_BA', lang_a, rt_a_pdf)
+    elif force or not rt_a_pdf.exists():
         print(f'[Step 2] Translating {lang_b}\u2192{lang_a} ...')
         _run_pipeline(
             rt_b_pdf, lang_b, lang_a,
@@ -396,6 +423,8 @@ def main():
                         help='Geo distance weight in cost (default: 0.6)')
     parser.add_argument('--force', action='store_true',
                         help='Re-run pipeline even if cached PDFs exist')
+    parser.add_argument('--layout-only', action='store_true', default=False,
+                        help='Re-run only layout_agent (B\u2192A) using cached translated.json')
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf_path).resolve()
@@ -412,7 +441,7 @@ def main():
         work_dir = pdf_path.parent / f'work_rt_{lang_b}'
 
     run_eval(pdf_path, lang_a, lang_b, work_dir,
-             alpha=args.alpha, beta=args.beta, force=args.force)
+             alpha=args.alpha, beta=args.beta, force=args.force, layout_only=args.layout_only)
 
 
 if __name__ == '__main__':
