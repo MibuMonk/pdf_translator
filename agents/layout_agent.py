@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 _LINE_HEIGHT_FACTOR = 1.2
 _MARGIN = 1.0
-_Y_GAP_MERGE = 6.0       # pixels — adjacent block merge threshold
+_Y_GAP_MERGE = 12.0      # pixels — adjacent block merge threshold
 _X_OVERLAP_RATIO = 0.30  # 30% x-overlap for adjacent merge
 
 
