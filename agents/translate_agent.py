@@ -386,6 +386,26 @@ def _call_claude_translate(
     if context_section:
         context_block = f"\n参考术语与背景知识：\n{context_section}\n"
 
+    # Build target-language-specific examples so the LLM isn't confused by
+    # seeing Japanese output examples when the target is actually Chinese.
+    if "中文" in tgt_name or tgt_name in ("zh", "zh-TW", "zh-CN"):
+        _tgt_examples = (
+            '  例："Cloud Data Infra:" → "云数据基础设施："（不能原样返回）\n'
+            '  例："DIS, Data Ingestion Service" → "DIS（数据采集服务）"\n'
+            '  例："SOP Vehicle" → "SOP量产车辆"\n'
+        )
+    elif "English" in tgt_name or tgt_name == "en":
+        _tgt_examples = (
+            '  例："ADアルゴリズム" → "AD Algorithm"\n'
+            '  例："自動運転システム" → "Autonomous Driving System"\n'
+        )
+    else:
+        _tgt_examples = (
+            '  例："Cloud Data Infra:" → "クラウドデータ基盤："（不能原样返回）\n'
+            '  例："DIS, Data Ingestion Service" → "DIS（データ取り込みサービス）"\n'
+            '  例："SOP Vehicle" → "SOP 車両" / "量产车辆"\n'
+        )
+
     # Detect if any batch item contains span tags
     has_span_tags = any('<s1>' in t for _, t in batch)
     span_instruction = ""
@@ -411,9 +431,7 @@ def _call_claude_translate(
         f"**必须翻译（关键规则）**\n"
         f"- 每一条文本都必须翻译成 {tgt_name}，禁止原样返回源文本\n"
         f"- 即使文本包含品牌名、缩略词或专有名词，其中的通用词/描述性部分也必须翻译\n"
-        f"  例：\"Cloud Data Infra:\" → \"クラウドデータ基盤：\"（不能原样返回）\n"
-        f"  例：\"DIS, Data Ingestion Service\" → \"DIS（データ取り込みサービス）\"\n"
-        f"  例：\"SOP Vehicle\" → \"SOP 車両\" / \"量产车辆\"\n"
+        f"{_tgt_examples}"
         f"- 只有纯数字、标点、符号构成的文本才可以原样输出\n\n"
         f"**术语准确性**\n"
         f"- 专业术语使用行业标准译名\n"
@@ -516,15 +534,31 @@ def _call_claude_retry_translate(
     input_items = [{"id": k, "text": _protect_newlines(t)} for k, (_, t) in enumerate(batch)]
     input_json = json.dumps(input_items, ensure_ascii=False)
 
+    if "中文" in tgt_name or tgt_name in ("zh", "zh-TW", "zh-CN"):
+        _retry_examples = (
+            '- 例："Cloud Data Infra:" → "云数据基础设施："\n'
+            '- 例："SOP Vehicle" → "SOP量产车辆"\n'
+            '- 例："DIS, Data Ingestion Service" → "DIS（数据采集服务）"\n'
+        )
+    elif "English" in tgt_name or tgt_name == "en":
+        _retry_examples = (
+            '- 例："ADアルゴリズム" → "AD Algorithm"\n'
+            '- 例："自動運転" → "Autonomous Driving"\n'
+        )
+    else:
+        _retry_examples = (
+            '- 例："Cloud Data Infra:" → "クラウドデータ基盤："\n'
+            '- 例："SOP Vehicle" → "量産車両"\n'
+            '- 例："DIS, Data Ingestion Service" → "DIS（データ取り込みサービス）"\n'
+        )
+
     prompt = (
         f"你是翻译质量审核员。以下文本在上一轮翻译中被错误地原样返回，没有翻译。\n\n"
         f"## 严格要求\n"
         f"- 每一条文本必须翻译成 {tgt_name}，绝对禁止原样返回\n"
         f"- 换行符标记（{_NEWLINE_PLACEHOLDER}）必须原样保留\n"
         f"- 品牌名（如 Momenta）和纯缩略词（如 DIS, FDC）可以保留，但描述性文字必须翻译\n"
-        f"- 例：\"Cloud Data Infra:\" → \"クラウドデータ基盤：\"\n"
-        f"- 例：\"SOP Vehicle\" → \"量産車両\"\n"
-        f"- 例：\"DIS, Data Ingestion Service\" → \"DIS（データ取り込みサービス）\"\n\n"
+        f"{_retry_examples}\n"
         f"## 输入\n{input_json}\n\n"
         f"## 输出\n"
         f"仅返回 JSON 数组，将每个 text 替换为 {tgt_name} 译文。禁止输出任何说明文字。\n"
@@ -668,6 +702,14 @@ def translate_texts(
     src_name = SUPPORTED_LANGUAGES.get(src, src)
     tgt_name = SUPPORTED_LANGUAGES.get(tgt, tgt)
 
+    # Japanese kanji shares the CJK Unicode block with Chinese but is NOT Chinese.
+    # Don't treat unchanged kanji-only Japanese as "already in target language".
+    _already_target = (
+        (lambda t: False)
+        if (src == 'ja' and tgt.startswith('zh'))
+        else (lambda t: _is_target_language(t, tgt))
+    )
+
     results = [None] * len(texts)
 
     # Indices that need actual translation
@@ -676,7 +718,7 @@ def translate_texts(
         if text in cache:
             cached = cache[text]
             # Reject poisoned cache: source == translation for translatable text
-            if cached == text and _needs_translation(text) and not _is_target_language(text, tgt):
+            if cached == text and _needs_translation(text) and not _already_target(text):
                 to_translate.append((i, text))
             else:
                 results[i] = cached
@@ -713,7 +755,7 @@ def translate_texts(
         if results[i] is None and not _is_trivially_invariant(text):
             # Item was dropped from LLM response (e.g. due to output truncation)
             unchanged.append((i, text))
-        elif results[i] is not None and results[i] == text and _needs_translation(text) and not _is_target_language(text, tgt):
+        elif results[i] is not None and results[i] == text and _needs_translation(text) and not _already_target(text):
             unchanged.append((i, text))
 
     if unchanged:
@@ -737,7 +779,7 @@ def translate_texts(
         # Report remaining unchanged after retry
         still_unchanged = sum(
             1 for i, text in enumerate(texts)
-            if results[i] is not None and results[i] == text and _needs_translation(text) and not _is_target_language(text, tgt)
+            if results[i] is not None and results[i] == text and _needs_translation(text) and not _already_target(text)
         )
         if still_unchanged:
             print(
