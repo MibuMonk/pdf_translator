@@ -94,6 +94,19 @@ def print_diagnosis_prompt(report: dict, target_score: float):
               f'\u2014 text expansion creates blocks with no original counterpart')
         print()
 
+    # Orphan breakdown by category
+    oa = report.get('orphan_analysis', {})
+    if oa:
+        issue_num += 1
+        lines = []
+        for cat, info in oa.items():
+            if info['count'] > 0:
+                ex = info['examples'][:1]
+                ex_str = f' e.g. {ex[0][:40]!r}' if ex else ''
+                lines.append(f'    {cat}: {info["count"]}{ex_str}')
+        print(f'{issue_num}. orphan_rt breakdown:')
+        print('\n'.join(lines))
+        print()
 
     print('LAYOUT AGENT FILE: agents/layout_agent.py')
     print('Analyze the above issues and propose specific code fixes.')
@@ -132,20 +145,21 @@ def _print_history_table(history: list):
 # ---------------------------------------------------------------------------
 
 def _auto_fix(report: dict, target_score: float, work_dir: Path):
-    """Dispatch claude CLI to auto-fix layout_agent.py based on diagnosis."""
-    import shutil as shutil_inner
+    """
+    Auto-fix layout/translate agents based on orphan analysis.
+    Routes to the correct agent file. Rolls back if the fix raises an error.
+    """
+    import shutil as _sh
     project_root = Path(__file__).resolve().parent.parent
-    layout_agent_path = project_root / 'agents' / 'layout_agent.py'
-
-    claude_bin = shutil_inner.which('claude') or 'claude'
+    claude_bin = _sh.which('claude') or 'claude'
 
     s = report['summary']
     score = s['score']
-    orphan_rt_rate = s.get('orphan_rt_rate', 0.0)
-    line_overflow_pct = s.get('line_overflow_pct', 0.0)
-    color_mismatch_pct = s.get('color_mismatch_pct', 0.0)
+    oa = report.get('orphan_analysis', {})
 
-    # Build worst-cases string from top matches by match_cost
+    untranslated_count = oa.get('untranslated', {}).get('count', 0)
+    fragment_count = oa.get('fragment', {}).get('count', 0)
+
     worst = report.get('worst_blocks', [])[:5]
     worst_str = '\n'.join(
         f"  page {m['page']}: orig={m['orig_text'][:40]!r} rt={m['rt_text'][:40]!r} "
@@ -153,38 +167,58 @@ def _auto_fix(report: dict, target_score: float, work_dir: Path):
         for m in worst
     )
 
-    prompt = f"""You are a layout fixer for the PDF translation pipeline at {project_root}.
+    fixes = []
 
-TASK: Fix agents/layout_agent.py to improve the round-trip layout score.
+    if untranslated_count > 0:
+        examples = oa.get('untranslated', {}).get('examples', [])
+        agent_path = project_root / 'agents' / 'translate_agent.py'
+        backup = agent_path.read_text(encoding='utf-8')
+        prompt = (
+            f"Who you are: translation coverage fixer for the PDF pipeline at {project_root}.\n"
+            f"What you're good at: finding and fixing block-skipping bugs in translate_agent.py.\n"
+            f"What you don't do: change I/O contracts, refactor unrelated code.\n\n"
+            f"TASK: Fix agents/translate_agent.py so ALL blocks get translated.\n\n"
+            f"Score: {score:.4f} (target: {target_score})\n"
+            f"Untranslated blocks in output: {untranslated_count}\n"
+            f"Examples:\n" + '\n'.join(f'  - {e[:80]!r}' for e in examples) + "\n\n"
+            f"Read the file, find the filter/skip logic causing this, make a minimal fix."
+        )
+        fixes.append(('translate_agent', agent_path, backup, prompt))
 
-Current score: {score:.4f} (target: {target_score})
+    if fragment_count > 0:
+        examples = oa.get('fragment', {}).get('examples', [])
+        agent_path = project_root / 'agents' / 'layout_agent.py'
+        backup = agent_path.read_text(encoding='utf-8')
+        prompt = (
+            f"Who you are: layout fixer for the PDF pipeline at {project_root}.\n"
+            f"What you're good at: reducing unnecessary block splitting in layout_agent.py.\n"
+            f"What you don't do: change I/O contracts, refactor unrelated code.\n\n"
+            f"TASK: Fix agents/layout_agent.py to reduce text block fragmentation.\n\n"
+            f"Score: {score:.4f} (target: {target_score})\n"
+            f"Fragment orphan blocks (short splits of larger blocks): {fragment_count}\n"
+            f"Fragment examples: {examples[:3]}\n"
+            f"line_overflow: {s.get('line_overflow_pct', 0):.1f}%\n"
+            f"orphan_rt_rate: {s.get('orphan_rt_rate', 0):.1%}\n\n"
+            f"Worst matched blocks:\n{worst_str}\n\n"
+            f"Read the file, find where blocks get split during rendering, make a minimal fix."
+        )
+        fixes.append(('layout_agent', agent_path, backup, prompt))
 
-TOP ISSUES:
-- line_overflow: {line_overflow_pct:.1f}% of matched blocks have more lines than original
-- color_mismatch: {color_mismatch_pct:.1f}% of matched blocks have wrong text color
-- orphan_rt_rate: {orphan_rt_rate:.1%} of rt blocks are unmatched (text expansion creates extra blocks)
+    if not fixes:
+        print('[auto] No actionable orphan categories (only expansion). Skipping fix.')
+        return
 
-WORST BLOCKS (highest match cost):
-{worst_str}
-
-INSTRUCTIONS:
-1. Read agents/layout_agent.py carefully
-2. Identify the root cause of the top issues listed above
-3. Make minimal, targeted fixes \u2014 do not refactor unrelated code
-4. Focus on: font shrinking to fit text, color preservation, line wrapping logic
-5. Do NOT change the I/O interface or agent contract
-
-Working directory: {project_root}
-"""
-
-    print(f'\n[auto] Calling claude to fix layout_agent.py ...')
-    result = subprocess.run(
-        [claude_bin, '--dangerously-skip-permissions', '-p', prompt],
-        cwd=str(project_root),
-        timeout=600,
-    )
-    if result.returncode != 0:
-        print(f'[auto] claude returned exit code {result.returncode}, continuing...')
+    for agent_name, agent_path, backup, prompt in fixes:
+        print(f'\n[auto] Fixing {agent_name} '
+              f'(untranslated={untranslated_count}, fragments={fragment_count}) ...')
+        result = subprocess.run(
+            [claude_bin, '--dangerously-skip-permissions', '-p', prompt],
+            cwd=str(project_root),
+            timeout=600,
+        )
+        if result.returncode != 0:
+            print(f'[auto] claude exited {result.returncode} — rolling back {agent_name}')
+            agent_path.write_text(backup, encoding='utf-8')
 
 
 def main():

@@ -251,6 +251,36 @@ def _run_pipeline(input_pdf: Path, src: str, tgt: str, output_pdf: Path,
 
 
 # ---------------------------------------------------------------------------
+# Orphan categorization
+# ---------------------------------------------------------------------------
+
+def _categorize_orphans(rt_blocks, matched_rt_texts, lang_a):
+    """
+    Categorize unmatched RT blocks into three types:
+      untranslated - contains CJK when lang_a is non-CJK (translate_agent skipped it)
+      fragment     - <=5 words and text is a substring of matched content (layout_agent split a block)
+      expansion    - everything else (translation genuinely added content)
+    """
+    def _has_cjk(text):
+        return any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in text)
+
+    cjk_target = lang_a in ('ja', 'zh', 'ko')
+    matched_joined = ' '.join(matched_rt_texts).lower()
+
+    cats = {'untranslated': [], 'fragment': [], 'expansion': []}
+    for b in rt_blocks:
+        text = b['text']
+        if not cjk_target and _has_cjk(text):
+            cats['untranslated'].append(text)
+        elif len(text.split()) <= 5 and text.lower().strip() in matched_joined:
+            cats['fragment'].append(text)
+        else:
+            cats['expansion'].append(text)
+
+    return {cat: {'count': len(v), 'examples': v[:3]} for cat, v in cats.items()}
+
+
+# ---------------------------------------------------------------------------
 # Main evaluation function (importable)
 # ---------------------------------------------------------------------------
 
@@ -331,6 +361,11 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
     # Save updated sim cache
     _save_sim_cache(sim_cache_path, sim_cache)
 
+    # Categorize orphan RT blocks
+    matched_rt_texts = [m['rt_text'] for m in all_matches]
+    orphan_rt_blocks = [b for b in rt_blocks if b['text'] not in matched_rt_texts]
+    orphan_analysis = _categorize_orphans(orphan_rt_blocks, matched_rt_texts, lang_a)
+
     # Step 6/7 \u2014 Aggregate metrics
     matched = len(all_matches)
     total_blocks = len(orig_blocks)
@@ -376,6 +411,7 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
             'score': score,
         },
         'worst_blocks': worst_blocks,
+        'orphan_analysis': orphan_analysis,
         'matches': all_matches,
     }
 
@@ -398,6 +434,13 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
     print(f'  Avg line delta  : {s["avg_line_delta"]:+.2f}')
     print(f'  Avg font \u0394      : {s["avg_font_size_delta_pct"]:+.1f}%')
     print(f'  Orphan RT rate  : {s["orphan_rt_rate"]:.1%}')
+    oa = report.get('orphan_analysis', {})
+    if oa:
+        print(f'  Orphan breakdown:')
+        for cat, info in oa.items():
+            ex = info['examples'][:1]
+            ex_str = f' e.g. {ex[0][:40]!r}' if ex else ''
+            print(f'    {cat:12s}: {info["count"]:3d}{ex_str}')
     print(f'  Avg match cost  : {s["avg_match_cost"]:.4f}')
     print(f'  SCORE           : {s["score"]:.4f}')
     print(f'  Report saved to : {report_path}')
