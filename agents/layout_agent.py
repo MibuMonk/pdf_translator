@@ -957,6 +957,7 @@ def render_page(
     # For blocks WITH a colored background: draw a same-color rect to cover
     # the text without erasing the underlying vector graphics.
     bg_cover_rects: list[tuple] = []  # (fitz.Rect, fill_color_tuple)
+    white_cover_rects: list[fitz.Rect] = []  # rects that used add_redact_annot (non-fill=None)
 
     _union_rects_added: set[tuple] = set()
     for blk_idx, block in enumerate(blocks):
@@ -976,10 +977,12 @@ def render_page(
                         bg_cover_rects.append((r, bg_fill))
                     else:
                         page.add_redact_annot(r)
+                        white_cover_rects.append(r)
             else:
                 if key not in _union_rects_added:
                     _union_rects_added.add(key)
                     page.add_redact_annot(union_r)
+                    white_cover_rects.append(union_r)
         else:
             for rb in block.get("redact_bboxes", []):
                 r = fitz.Rect(rb)
@@ -995,6 +998,7 @@ def render_page(
                     bg_cover_rects.append((r, bg_fill))
                 else:
                     page.add_redact_annot(r)
+                    white_cover_rects.append(r)
 
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
@@ -1005,6 +1009,19 @@ def render_page(
         shape.draw_rect(cover_rect)
         shape.finish(fill=fill_color, color=None, width=0)
     shape.commit()
+
+    # Draw white cover rects for blocks that used add_redact_annot.
+    # apply_redactions() only clears the main content stream; Form XObject
+    # text (slide template glyphs) is rendered after the main stream and
+    # would appear on top of the white redaction fill.  Appending a white
+    # rect via new_shape().commit() writes AFTER all XObject Do calls,
+    # ensuring XObject content is fully covered.
+    if white_cover_rects:
+        wshape = page.new_shape()
+        for wr in white_cover_rects:
+            wshape.draw_rect(wr)
+            wshape.finish(fill=(1, 1, 1), color=None, width=0)
+        wshape.commit()
 
     # ------------------------------------------------------------------
     # Step 2: Pre-process translated texts

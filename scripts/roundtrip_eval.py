@@ -45,15 +45,44 @@ def _detect_lang_from_filename(pdf_path: Path) -> str:
 # Block extraction
 # ---------------------------------------------------------------------------
 
-def extract_blocks(pdf_path):
+def extract_blocks(pdf_path, filter_covered=False):
     doc = fitz.open(str(pdf_path))
     all_blocks = []
     for page_num, page in enumerate(doc):
         page_w = page.rect.width
         page_h = page.rect.height
         raw = page.get_text('dict', flags=fitz.TEXT_PRESERVE_WHITESPACE)
+
+        # When filter_covered=True (used for layout_agent output PDFs), build a
+        # list of opaque fill rects and skip XObject ghost blocks that survived
+        # apply_redactions() but are visually covered by white/bg cover rects.
+        opaque_rects = []
+        if filter_covered:
+            for d in page.get_drawings():
+                if d.get("fill") is not None and d.get("rect") is not None:
+                    opaque_rects.append(fitz.Rect(d["rect"]))
+
+        def _is_covered(bbox, threshold=0.80):
+            """Return True if >= threshold fraction of bbox area is covered by opaque rects."""
+            if not opaque_rects:
+                return False
+            r = fitz.Rect(bbox)
+            area = r.width * r.height
+            if area <= 0:
+                return False
+            covered = 0.0
+            for or_ in opaque_rects:
+                inter = r & or_
+                if not inter.is_empty:
+                    covered += inter.width * inter.height
+            return (covered / area) >= threshold
+
         for block in raw['blocks']:
             if block['type'] != 0:
+                continue
+            # Skip blocks substantially covered by opaque drawing rects —
+            # these are XObject ghosts that survived apply_redactions().
+            if filter_covered and _is_covered(block['bbox']):
                 continue
             lines = block['lines']
             line_count = len(lines)
@@ -198,6 +227,7 @@ def match_page(orig_blocks, rt_blocks, alpha, beta, sim_cache):
                 'font_size_delta_pct': fsd_pct,
                 'bbox_area_orig': bbox_area(bo['bbox']),
                 'bbox_area_rt': bbox_area(br['bbox']),
+                'bbox_rt': br['bbox'],
             })
             assigned_orig.add(r)
             assigned_rt.add(c)
@@ -375,6 +405,7 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
         all_matches = []
         total_orphan_orig = 0
         total_orphan_rt = 0
+        total_ghost_rt = 0  # orphan_rt blocks that overlap matched rt blocks (XObject ghosts)
 
         for pg in all_pages:
             ob = orig_by_page.get(pg, [])
@@ -383,6 +414,28 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
             all_matches.extend(matches)
             total_orphan_orig += oo
             total_orphan_rt += or_
+
+            # Ghost detection: orphan_rt blocks that substantially overlap a matched
+            # rt block are XObject ghosts (visually covered but structurally present).
+            # Don't count these against the layout quality score.
+            # Use bbox-based tracking (not text) to handle duplicate-text blocks.
+            if or_ > 0:
+                matched_rt_bboxes = [m['bbox_rt'] for m in matches]
+                matched_rt_bbox_keys = {tuple(b) for b in matched_rt_bboxes}
+                for orb in rb:
+                    if tuple(orb['bbox']) in matched_rt_bbox_keys:
+                        continue  # this block was actually matched
+                    orb_area = bbox_area(orb['bbox'])
+                    if orb_area <= 0:
+                        continue
+                    ox0, oy0, ox1, oy1 = orb['bbox']
+                    for mb in matched_rt_bboxes:
+                        ix0 = max(ox0, mb[0]); iy0 = max(oy0, mb[1])
+                        ix1 = min(ox1, mb[2]); iy1 = min(oy1, mb[3])
+                        if ix1 > ix0 and iy1 > iy0:
+                            if (ix1 - ix0) * (iy1 - iy0) / orb_area >= 0.5:
+                                total_ghost_rt += 1
+                                break
 
         _save_sim_cache(sim_cache_path, sim_cache)
 
@@ -396,7 +449,8 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
             if m.get('font_size_orig', 0) > 0
         ]
         overflow_rate = overflow_count / max(matched, 1)
-        blank_rate = total_orphan_rt / max(matched + total_orphan_rt, 1)
+        real_orphan_rt = total_orphan_rt - total_ghost_rt
+        blank_rate = real_orphan_rt / max(matched + real_orphan_rt, 1)
         font_mse = (
             sum(((abs(d / 100.0 * e) / max(e, 1.0)) ** 2) for d, e in font_deltas)
             / max(len(font_deltas), 1)
@@ -424,6 +478,7 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
                 'matched_blocks': matched,
                 'orphan_orig': total_orphan_orig,
                 'orphan_rt': total_orphan_rt,
+                'ghost_rt': total_ghost_rt,
                 'color_mismatch_count': color_mismatch,
                 'color_mismatch_pct': color_mismatch_pct,
                 'line_overflow_count': overflow_count,
@@ -450,7 +505,7 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
         print(f'  Timestamp: {report["timestamp"]}')
         print()
         print(f'  Blocks   : {s["total_blocks"]} original, {s["matched_blocks"]} matched')
-        print(f'  Orphans  : {s["orphan_orig"]} orig-only, {s["orphan_rt"]} rt-only')
+        print(f'  Orphans  : {s["orphan_orig"]} orig-only, {s["orphan_rt"]} rt-only ({s["ghost_rt"]} ghosts)')
         print(f'  Line overflow   : {s["line_overflow_count"]} ({s["line_overflow_pct"]:.1f}%)')
         print(f'  Avg line delta  : {s["avg_line_delta"]:+.2f}')
         print(f'  Avg font \u0394      : {s["avg_font_size_delta_pct"]:+.1f}%')
@@ -498,7 +553,7 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
     # Step 3 \u2014 Extract blocks
     print('[Step 3] Extracting blocks ...')
     orig_blocks = extract_blocks(pdf_path)
-    rt_blocks = extract_blocks(rt_a_pdf)
+    rt_blocks = extract_blocks(rt_a_pdf, filter_covered=True)
 
     # Step 4 \u2014 Load / init text similarity cache
     sim_cache_path = work_dir / 'text_sim_cache.json'
