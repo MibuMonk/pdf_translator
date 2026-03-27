@@ -300,6 +300,9 @@ def find_best_span_match(target_bbox, spans, tolerance=5.0):
         bcy = (by0 + by1) / 2
         if bcy < ty0 - tolerance or bcy > ty1 + tolerance:
             continue
+        # Require x-range overlap (with tolerance)
+        if bx1 < tx0 - tolerance or bx0 > tx1 + tolerance:
+            continue
         dx0 = abs(bx0 - tx0)
         dy = abs(bcy - tcy)
         candidates.append((dy, dx0, span))
