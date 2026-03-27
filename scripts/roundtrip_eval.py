@@ -265,14 +265,14 @@ def _categorize_orphans(rt_blocks, matched_rt_texts, lang_a):
         return any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in text)
 
     cjk_target = lang_a in ('ja', 'zh', 'ko')
-    matched_joined = ' '.join(matched_rt_texts).lower()
+    matched_lower = [t.lower() for t in matched_rt_texts]
 
     cats = {'untranslated': [], 'fragment': [], 'expansion': []}
     for b in rt_blocks:
         text = b['text']
         if not cjk_target and _has_cjk(text):
             cats['untranslated'].append(text)
-        elif len(text.split()) <= 5 and text.lower().strip() in matched_joined:
+        elif len(text.split()) <= 5 and any(text.lower().strip() in m for m in matched_lower):
             cats['fragment'].append(text)
         else:
             cats['expansion'].append(text)
