@@ -23,7 +23,7 @@ import fitz  # PyMuPDF
 sys.path.insert(0, str(Path(__file__).parent))
 from visual_agent import VisualOptimizer       # noqa: E402
 from topology_agent import TopologyAnalyzer    # noqa: E402
-from shared_utils import has_cjk, cluster      # noqa: E402
+from shared_utils import has_cjk, cluster, parse_pages  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1453,23 +1453,6 @@ def render_page(
                     fontfile=cjk_font,
                     min_factor=mf,
                 )
-
-
-# ---------------------------------------------------------------------------
-# Page-range parsing
-# ---------------------------------------------------------------------------
-
-def parse_pages(spec: str) -> list:
-    """Parse a page specification like "1,3,5-8" into a sorted list of 1-based page numbers."""
-    pages = set()
-    for part in spec.split(","):
-        part = part.strip()
-        if "-" in part:
-            a, b = part.split("-", 1)
-            pages.update(range(int(a), int(b) + 1))
-        else:
-            pages.add(int(part))
-    return sorted(pages)
 
 
 # ---------------------------------------------------------------------------

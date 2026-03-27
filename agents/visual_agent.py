@@ -255,7 +255,7 @@ class VisualOptimizer:
         percentile: float = 0.90,
     ) -> List[float]:
         """
-        Apply 80th-percentile cap per base_size group.
+        Apply percentile-based cap per base_size group (default: 90th percentile).
         Returns render_sizes[i] = min(fitting_sizes[i], cap[base_sizes[i]]).
         Title blocks (title_mask[i]=True) are uncapped.
 
@@ -275,9 +275,11 @@ class VisualOptimizer:
         # REQ-4: Compute global_body_cap from all non-title fitting sizes
         non_title_indices = [i for i in range(n) if not title_mask[i]]
         if len(non_title_indices) >= 3:
-            global_body_cap: Optional[float] = max(
-                fitting_sizes[i] for i in non_title_indices
+            _global_desc = sorted(
+                [fitting_sizes[i] for i in non_title_indices], reverse=True
             )
+            _k = int(len(_global_desc) * (1 - percentile))
+            global_body_cap: Optional[float] = _global_desc[_k]
         else:
             global_body_cap = None
 
@@ -294,7 +296,7 @@ class VisualOptimizer:
                 sorted_desc = sorted(
                     [fitting_sizes[i] for i in indices], reverse=True
                 )
-                k = int(len(sorted_desc) * (1 - percentile))  # int(n * 0.20)
+                k = int(len(sorted_desc) * (1 - percentile))
                 cap[base_size] = sorted_desc[k]
 
         # Build result

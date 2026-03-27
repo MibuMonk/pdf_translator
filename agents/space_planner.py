@@ -27,7 +27,7 @@ import fitz  # PyMuPDF
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent))
 from topology_agent import TopologyAnalyzer  # noqa: E402
-from shared_utils import cluster              # noqa: E402
+from shared_utils import cluster, parse_pages   # noqa: E402
 
 # contracts/ is two directories up from this file
 _CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
@@ -39,22 +39,6 @@ from contracts.validate import validate_output  # noqa: E402
 # ---------------------------------------------------------------------------
 _VERSION = "1.0.0"
 
-
-# ---------------------------------------------------------------------------
-# Page-range helper (mirrors layout_agent.parse_pages)
-# ---------------------------------------------------------------------------
-
-def _parse_pages(spec: str) -> list[int]:
-    """Parse a page spec like "1,3,5-8" into a sorted list of 1-based page numbers."""
-    pages: set[int] = set()
-    for part in spec.split(","):
-        part = part.strip()
-        if "-" in part:
-            a, b = part.split("-", 1)
-            pages.update(range(int(a), int(b) + 1))
-        else:
-            pages.add(int(part))
-    return sorted(pages)
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +383,7 @@ def main() -> None:
 
     # Determine which pages to process
     if args.pages:
-        requested = set(_parse_pages(args.pages))
+        requested = set(parse_pages(args.pages))
     else:
         requested = set(page_map.keys())
 

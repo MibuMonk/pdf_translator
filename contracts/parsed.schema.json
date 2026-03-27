@@ -40,7 +40,7 @@
     },
     "block": {
       "type": "object",
-      "required": ["id", "text", "font_size", "color", "align", "bbox", "redact_bboxes"],
+      "required": ["id", "text", "font_size", "color", "align", "bbox", "redact_bboxes", "stream_rank"],
       "properties": {
         "id":           { "type": "string", "pattern": "^p[0-9]+_b[0-9]+$" },
         "text":         { "type": "string" },

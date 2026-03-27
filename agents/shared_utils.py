@@ -3,6 +3,7 @@ shared_utils.py — Shared utility functions used by multiple agents.
 
 Centralises duplicated helpers so each agent imports from one place.
 """
+from typing import Optional
 
 
 def has_cjk(text: str) -> bool:
@@ -44,3 +45,27 @@ def cluster(vals: list, tol: float = 3.0, min_count: int = 2) -> dict:
             rep = sum(grp) / len(grp)
             result[rep] = grp
     return result
+
+
+def parse_pages(spec: str, total_pages: Optional[int] = None) -> list:
+    """Parse a page specification like "1,3,5-8" into a sorted list of 1-based page numbers.
+
+    Parameters
+    ----------
+    spec:
+        Comma-separated page numbers or inclusive ranges, e.g. "1,3,5-8".
+    total_pages:
+        When provided, numbers outside [1, total_pages] are silently clipped.
+        When None, no bounds checking is applied.
+    """
+    pages: set = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            a, b = part.split("-", 1)
+            pages.update(range(int(a.strip()), int(b.strip()) + 1))
+        else:
+            pages.add(int(part))
+    if total_pages is not None:
+        pages = {p for p in pages if 1 <= p <= total_pages}
+    return sorted(pages)

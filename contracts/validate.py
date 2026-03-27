@@ -45,7 +45,19 @@ def _check(data, schema: dict, root_schema: dict, path: str, violations: list):
             key = ref.split("/")[-1]
             _check(data, root_schema["$defs"][key], root_schema, path, violations)
             return
-        # cross-file refs: skip (treated as valid)
+        # cross-file ref: load referenced schema and validate against it
+        ref_path = SCHEMA_DIR / ref
+        if ref_path.exists():
+            with open(ref_path, encoding="utf-8") as _f:
+                ref_schema = json.load(_f)
+            _check(data, ref_schema, ref_schema, path, violations)
+        # if file not found, fall through as valid (conservative)
+        return
+
+    # allOf: data must satisfy every sub-schema
+    if "allOf" in schema:
+        for i, sub in enumerate(schema["allOf"]):
+            _check(data, sub, root_schema, f"{path}[allOf[{i}]]", violations)
         return
 
     schema_type = schema.get("type")
