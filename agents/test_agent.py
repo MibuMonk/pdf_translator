@@ -2538,6 +2538,11 @@ def run_checks(testcase: str, registry_path: Path, output_path: Path,
     if translated_json_path is None:
         testcase_dir = PROJECT_ROOT / "testdata" / testcase
         output_pdf_path = testcase_dir / "output.pdf"
+        if not output_pdf_path.exists():
+            candidates = sorted(testcase_dir.glob("*.pdf"))
+            candidates = [p for p in candidates if p.name not in ("source.pdf", "review_bundle.pdf")]
+            if candidates:
+                output_pdf_path = candidates[0]
         translated_json_path = testcase_dir / "work" / "translated.json"
         if not translated_json_path.exists():
             # fallback: pipeline uses {stem}.translated.json naming
@@ -2921,10 +2926,17 @@ def _resolve_testcase_paths(testcase: str) -> dict:
     if not translated_path.exists():
         translated_path = work_dir / "source.translated.json"
 
+    output_pdf = testcase_dir / "output.pdf"
+    if not output_pdf.exists():
+        candidates = sorted(testcase_dir.glob("*.pdf"))
+        candidates = [p for p in candidates if p.name not in ("source.pdf", "review_bundle.pdf")]
+        if candidates:
+            output_pdf = candidates[0]
+
     return {
         "testcase_dir": testcase_dir,
         "work_dir": work_dir,
-        "output_pdf": testcase_dir / "output.pdf",
+        "output_pdf": output_pdf,
         "parsed_json": parsed_path,
         "translated_json": translated_path,
         "baseline_dir": testcase_dir / "baseline",
