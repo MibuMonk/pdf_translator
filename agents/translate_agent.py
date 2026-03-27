@@ -449,7 +449,7 @@ def _call_claude_translate(
         client = _make_client()
         message = client.messages.create(
             model=_get_model(),
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
         _last_raw = message.content[0].text.strip()
@@ -534,7 +534,7 @@ def _call_claude_retry_translate(
         client = _make_client()
         message = client.messages.create(
             model=_get_model(),
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
@@ -707,10 +707,13 @@ def translate_texts(
         # Save cache after every batch
         _save_cache(cache, cache_path)
 
-    # Retry: detect blocks where LLM returned source text unchanged
+    # Retry: detect blocks where LLM returned source text unchanged OR dropped entirely
     unchanged = []
     for i, text in enumerate(texts):
-        if results[i] is not None and results[i] == text and _needs_translation(text) and not _is_target_language(text, tgt):
+        if results[i] is None and not _is_trivially_invariant(text):
+            # Item was dropped from LLM response (e.g. due to output truncation)
+            unchanged.append((i, text))
+        elif results[i] is not None and results[i] == text and _needs_translation(text) and not _is_target_language(text, tgt):
             unchanged.append((i, text))
 
     if unchanged:
