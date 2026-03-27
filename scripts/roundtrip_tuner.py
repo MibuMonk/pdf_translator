@@ -214,7 +214,8 @@ def _auto_fix(report: dict, target_score: float, work_dir: Path):
         result = subprocess.run(
             [claude_bin, '--dangerously-skip-permissions', '-p', prompt],
             cwd=str(project_root),
-            timeout=600,
+            timeout=1800,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             print(f'[auto] claude exited {result.returncode} — rolling back {agent_name}')
