@@ -1007,13 +1007,21 @@ def render_page(
     ]
 
     # ------------------------------------------------------------------
-    # Step 3: Adjacent merge (skipped when plan is provided — consolidator
-    # already handled fragmentation; plan's block count must stay in sync)
+    # Step 3: Adjacent merge — run unconditionally so fragment orphan blocks
+    # (short splits that survived consolidator) are merged before rendering.
+    # If count changes and a plan was provided, discard the plan so all
+    # downstream steps fall back to live derivation (topology, title
+    # detection, snap_map).  groups_raw is also cleared because its block
+    # indices are based on the pre-merge layout.
     # ------------------------------------------------------------------
-    if plan_page is None:
-        translated_texts, bboxes, source_sizes = _merge_adjacent_blocks(
-            translated_texts, bboxes, source_sizes
-        )
+    _pre_merge_count = len(bboxes)
+    translated_texts, bboxes, source_sizes = _merge_adjacent_blocks(
+        translated_texts, bboxes, source_sizes
+    )
+    if len(bboxes) != _pre_merge_count:
+        if plan_page is not None:
+            plan_page = None   # block count changed; live fallback for everything
+            groups_raw = []    # plan group indices are now invalid
         # Re-derive aligns after merge
         new_aligns = []
         for i, bbox in enumerate(bboxes):
