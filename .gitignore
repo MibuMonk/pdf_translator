@@ -19,3 +19,4 @@ test_report.json
 # Secrets
 .env
 .claude/settings.json
+.claude/scheduled_tasks.lock
