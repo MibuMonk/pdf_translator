@@ -208,6 +208,53 @@ def match_page(orig_blocks, rt_blocks, alpha, beta, sim_cache):
 
 
 # ---------------------------------------------------------------------------
+# Identity eval helpers
+# ---------------------------------------------------------------------------
+
+def _create_identity_translated_json(parsed_json_path: Path, output_path: Path) -> None:
+    """Create translated.json with translated = text for each block (no API needed)."""
+    with open(parsed_json_path, encoding="utf-8") as f:
+        data = json.load(f)
+    for page in data.get("pages", []):
+        for block in page.get("blocks", []):
+            block["translated"] = block.get("text", "")
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _run_identity(pdf_path: Path, work_dir: Path, pages=None) -> Path:
+    """Run parse→consolidate→identity_translate→space_plan→layout without API calls.
+    Returns path to the rendered output PDF."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    agents_dir = Path(__file__).resolve().parent.parent / 'agents'
+
+    stem = pdf_path.stem
+    parsed_json = work_dir / f"{stem}.parsed.json"
+    translated_json = work_dir / f"{stem}.translated.json"
+    layout_plan = work_dir / "layout_plan.json"
+    output_pdf = work_dir / "identity_output.pdf"
+
+    def _run(cmd):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"{cmd[0]} failed:\n{r.stderr[-500:]}")
+
+    _run([sys.executable, str(agents_dir / "parse_agent.py"),
+          "--input", str(pdf_path), "--output", str(parsed_json)]
+         + (["--pages", pages] if pages else []))
+    _run([sys.executable, str(agents_dir / "consolidator.py"), str(parsed_json)])
+    _create_identity_translated_json(parsed_json, translated_json)
+    _run([sys.executable, str(agents_dir / "space_planner.py"),
+          "--input", str(pdf_path), "--json", str(parsed_json),
+          "--output", str(layout_plan)])
+    _run([sys.executable, str(agents_dir / "layout_agent.py"),
+          "--input", str(pdf_path), "--json", str(translated_json),
+          "--plan", str(layout_plan), "--output", str(output_pdf)]
+         + (["--pages", pages] if pages else []))
+    return output_pdf
+
+
+# ---------------------------------------------------------------------------
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
@@ -284,15 +331,137 @@ def _categorize_orphans(rt_blocks, matched_rt_texts, lang_a):
 # Main evaluation function (importable)
 # ---------------------------------------------------------------------------
 
-def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=False, layout_only=False):
+def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=False, layout_only=False, identity=False):
     """
     Run full round-trip evaluation and return the report dict.
     Also writes <work_dir>/roundtrip_report.json.
+
+    When identity=True, skips all API calls: parse→identity_translate→layout,
+    then compares source PDF vs rendered PDF (layout quality only).
     """
     pdf_path = Path(pdf_path).resolve()
+
+    # Identity mode: use a dedicated work dir if none specified
+    if identity and work_dir is None:
+        work_dir = pdf_path.parent / 'work_rt_identity'
     work_dir = Path(work_dir).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Identity eval branch ---
+    if identity:
+        print('[Identity] Running parse→identity_translate→layout (no API) ...')
+        rendered_pdf = _run_identity(pdf_path, work_dir / 'work_id')
+
+        print('[Identity] Extracting blocks ...')
+        orig_blocks = extract_blocks(pdf_path)
+        rt_blocks = extract_blocks(rendered_pdf)
+
+        sim_cache_path = work_dir / 'text_sim_cache.json'
+        sim_cache = _load_sim_cache(sim_cache_path)
+
+        # For identity mode, alpha=0 (skip text similarity; text is identical)
+        id_alpha = 0.0
+        id_beta = 1.0
+
+        orig_by_page = {}
+        rt_by_page = {}
+        for b in orig_blocks:
+            orig_by_page.setdefault(b['page'], []).append(b)
+        for b in rt_blocks:
+            rt_by_page.setdefault(b['page'], []).append(b)
+
+        all_pages = sorted(set(list(orig_by_page.keys()) + list(rt_by_page.keys())))
+
+        all_matches = []
+        total_orphan_orig = 0
+        total_orphan_rt = 0
+
+        for pg in all_pages:
+            ob = orig_by_page.get(pg, [])
+            rb = rt_by_page.get(pg, [])
+            matches, oo, or_ = match_page(ob, rb, id_alpha, id_beta, sim_cache)
+            all_matches.extend(matches)
+            total_orphan_orig += oo
+            total_orphan_rt += or_
+
+        _save_sim_cache(sim_cache_path, sim_cache)
+
+        matched = len(all_matches)
+
+        # Identity score formula
+        overflow_count = sum(1 for m in all_matches if m['line_delta'] > 0)
+        font_deltas = [
+            (m['font_size_delta_pct'], m['font_size_orig'])
+            for m in all_matches
+            if m.get('font_size_orig', 0) > 0
+        ]
+        overflow_rate = overflow_count / max(matched, 1)
+        blank_rate = total_orphan_rt / max(matched + total_orphan_rt, 1)
+        font_mse = (
+            sum(((abs(d / 100.0 * e) / max(e, 1.0)) ** 2) for d, e in font_deltas)
+            / max(len(font_deltas), 1)
+        )
+        score = 1.0 - (0.4 * overflow_rate + 0.3 * blank_rate + 0.3 * min(font_mse, 1.0))
+        score = max(0.0, min(1.0, score))
+
+        avg_line_delta = (sum(m['line_delta'] for m in all_matches) / matched) if matched else 0.0
+        avg_fsd = (sum(m['font_size_delta_pct'] for m in all_matches) / matched) if matched else 0.0
+        avg_cost = (sum(m['match_cost'] for m in all_matches) / matched) if matched else 0.0
+        color_mismatch = sum(1 for m in all_matches if not m['color_match'])
+        color_mismatch_pct = color_mismatch / matched * 100 if matched else 0.0
+        line_overflow_pct = overflow_count / matched * 100 if matched else 0.0
+
+        worst_blocks = sorted(all_matches, key=lambda m: m['match_cost'], reverse=True)[:20]
+
+        report = {
+            'pdf_path': str(pdf_path),
+            'lang_a': lang_a,
+            'lang_b': lang_b,
+            'mode': 'identity',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'summary': {
+                'total_blocks': len(orig_blocks),
+                'matched_blocks': matched,
+                'orphan_orig': total_orphan_orig,
+                'orphan_rt': total_orphan_rt,
+                'color_mismatch_count': color_mismatch,
+                'color_mismatch_pct': color_mismatch_pct,
+                'line_overflow_count': overflow_count,
+                'line_overflow_pct': line_overflow_pct,
+                'avg_line_delta': avg_line_delta,
+                'avg_font_size_delta_pct': avg_fsd,
+                'orphan_rt_rate': blank_rate,
+                'avg_match_cost': avg_cost,
+                'score': score,
+            },
+            'worst_blocks': worst_blocks,
+            'matches': all_matches,
+        }
+
+        report_path = work_dir / 'roundtrip_report.json'
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+
+        s = report['summary']
+        print()
+        print('=== Identity Layout Evaluation ===')
+        print(f'  PDF      : {pdf_path}')
+        print(f'  Mode     : identity (no API)')
+        print(f'  Timestamp: {report["timestamp"]}')
+        print()
+        print(f'  Blocks   : {s["total_blocks"]} original, {s["matched_blocks"]} matched')
+        print(f'  Orphans  : {s["orphan_orig"]} orig-only, {s["orphan_rt"]} rt-only')
+        print(f'  Line overflow   : {s["line_overflow_count"]} ({s["line_overflow_pct"]:.1f}%)')
+        print(f'  Avg line delta  : {s["avg_line_delta"]:+.2f}')
+        print(f'  Avg font \u0394      : {s["avg_font_size_delta_pct"]:+.1f}%')
+        print(f'  Orphan RT rate  : {s["orphan_rt_rate"]:.1%}')
+        print(f'  Avg match cost  : {s["avg_match_cost"]:.4f}')
+        print(f'  SCORE           : {s["score"]:.4f}')
+        print(f'  Report saved to : {report_path}')
+
+        return report
+
+    # --- Normal round-trip eval ---
     rt_b_pdf = work_dir / 'rt_B.pdf'
     rt_a_pdf = work_dir / 'rt_A.pdf'
 
@@ -457,7 +626,7 @@ def main():
         description='Round-trip layout evaluation for PDF translation pipeline'
     )
     parser.add_argument('pdf_path', help='Input PDF path')
-    parser.add_argument('--lang-b', required=True, help='Target language for round-trip')
+    parser.add_argument('--lang-b', default=None, help='Target language for round-trip')
     parser.add_argument('--lang-a', default=None, help='Source language (default: auto-detect)')
     parser.add_argument('--work-dir', default=None, help='Working directory for intermediates')
     parser.add_argument('--alpha', type=float, default=0.4,
@@ -468,6 +637,8 @@ def main():
                         help='Re-run pipeline even if cached PDFs exist')
     parser.add_argument('--layout-only', action='store_true', default=False,
                         help='Re-run only layout_agent (B\u2192A) using cached translated.json')
+    parser.add_argument('--identity', action='store_true',
+                        help='Identity eval: no translation API, tests layout quality only.')
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf_path).resolve()
@@ -475,16 +646,22 @@ def main():
         print(f'Error: PDF not found: {pdf_path}', file=sys.stderr)
         sys.exit(1)
 
+    if not args.identity and not args.lang_b:
+        parser.error('--lang-b is required unless --identity is set')
+
     lang_a = args.lang_a or _detect_lang_from_filename(pdf_path)
-    lang_b = args.lang_b
+    lang_b = args.lang_b or ''
 
     if args.work_dir:
         work_dir = Path(args.work_dir).resolve()
+    elif args.identity:
+        work_dir = pdf_path.parent / 'work_rt_identity'
     else:
         work_dir = pdf_path.parent / f'work_rt_{lang_b}'
 
     run_eval(pdf_path, lang_a, lang_b, work_dir,
-             alpha=args.alpha, beta=args.beta, force=args.force, layout_only=args.layout_only)
+             alpha=args.alpha, beta=args.beta, force=args.force,
+             layout_only=args.layout_only, identity=args.identity)
 
 
 if __name__ == '__main__':

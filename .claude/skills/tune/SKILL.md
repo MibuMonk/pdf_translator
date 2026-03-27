@@ -11,15 +11,19 @@ Runs the round-trip eval + auto-fix loop. Translates A→B→A, measures layout 
 
 1. Identify from the user's message:
    - **PDF path** (required, e.g. `testdata/成果物4/source.pdf`)
-   - **Target language** `--lang-b` (required, e.g. `ja`, `zh`, `en`)
-   - **Work dir** `--work-dir` (optional, default: `<pdf_parent>/work_rt_<lang-b>`)
+   - **Mode**: `--identity` (API-free, layout-only) OR `--lang-b <lang>` (full roundtrip, e.g. `ja`, `zh`, `en`)
+   - **Work dir** `--work-dir` (optional, default: `<pdf_parent>/work_rt_<lang-b>` or `work_rt_identity`)
    - **Target score** `--target-score` (optional, default: `0.90`)
    - **Max iterations** `--max-iters` (optional, default: `10`)
 
-2. If PDF path or target language is unclear, ask the user.
+2. If PDF path is unclear, ask the user. If neither `--identity` nor `--lang-b` is specified, default to `--identity`.
 
 3. Run in background:
    ```bash
+   # Identity mode (no API, pure layout test):
+   python3 scripts/roundtrip_tuner.py <pdf> --identity [--work-dir <dir>] --auto [--target-score X] [--max-iters N]
+
+   # Full roundtrip mode:
    python3 scripts/roundtrip_tuner.py <pdf> --lang-b <lang> [--work-dir <dir>] --auto [--target-score X] [--max-iters N]
    ```
 

@@ -227,7 +227,7 @@ def main():
         description='Iterative round-trip layout tuner'
     )
     parser.add_argument('pdf_path', help='Input PDF path')
-    parser.add_argument('--lang-b', required=True, help='Target language for round-trip')
+    parser.add_argument('--lang-b', default=None, help='Target language for round-trip')
     parser.add_argument('--lang-a', default=None, help='Source language (default: auto-detect)')
     parser.add_argument('--work-dir', default=None, help='Working directory for intermediates')
     parser.add_argument('--max-iters', type=int, default=10, help='Max iterations (default: 10)')
@@ -235,6 +235,8 @@ def main():
                         help='Target score to stop at (default: 0.90)')
     parser.add_argument('--auto', action='store_true', default=False,
                         help='Automatically call claude CLI to fix layout_agent.py each iteration')
+    parser.add_argument('--identity', action='store_true',
+                        help='Use identity eval mode (no API, layout quality only).')
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf_path).resolve()
@@ -242,11 +244,16 @@ def main():
         print(f'Error: PDF not found: {pdf_path}', file=sys.stderr)
         sys.exit(1)
 
+    if not args.identity and not args.lang_b:
+        parser.error('--lang-b is required unless --identity is set')
+
     lang_a = args.lang_a or _detect_lang_from_filename(pdf_path)
-    lang_b = args.lang_b
+    lang_b = args.lang_b or ''
 
     if args.work_dir:
         work_dir = Path(args.work_dir).resolve()
+    elif args.identity:
+        work_dir = pdf_path.parent / 'work_rt_identity'
     else:
         work_dir = pdf_path.parent / f'work_rt_{lang_b}'
 
@@ -257,11 +264,13 @@ def main():
     for iter_num in range(args.max_iters):
         print(f'\n=== Iteration {iter_num + 1} ===')
         # Use layout_only on iter 1+; force=False so cached PDFs (rt_B.pdf) are always reused
-        use_layout_only = (iter_num > 0)
+        # In identity mode, layout_only is not applicable (no rt_B.pdf); always re-run identity.
+        use_layout_only = (iter_num > 0) and not args.identity
         report = run_eval(pdf_path, lang_a, lang_b, work_dir,
                           alpha=0.4, beta=0.6,
                           force=False,
-                          layout_only=use_layout_only)
+                          layout_only=use_layout_only,
+                          identity=args.identity)
         score = report['summary']['score']
         print(f'Score: {score:.4f}')
 
