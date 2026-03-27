@@ -149,6 +149,52 @@ scripts/verify.sh 成果物4 16-21 --open
 
 ---
 
+## Self-Supervised Layout Tuning
+
+`scripts/roundtrip_tuner.py` runs an automated loop that evaluates and improves layout quality without human intervention:
+
+```
+source.pdf → [A→B pipeline] → rt_B.pdf → [B→A pipeline] → rt_A.pdf
+                                                               ↓
+                                              compare blocks vs source.pdf
+                                                               ↓
+                                              score + orphan categorization
+                                                               ↓
+                                    untranslated → fix translate_agent.py
+                                    fragments    → fix layout_agent.py
+                                    expansion    → skip (not actionable)
+                                                               ↓
+                                              re-render (layout-only, fast)
+                                                               ↑
+                                              ←─ repeat until score ≥ target
+```
+
+**Score formula:**
+```
+score = 1.0 - (0.3×color_mismatch + 0.3×line_overflow + 0.1×font_delta + 0.3×orphan_rt_rate)
+```
+
+**Orphan categories** (automatically classified):
+- `untranslated` — CJK text left in output when target language is non-CJK
+- `fragment` — short blocks (≤5 words) that are splits of a larger block
+- `expansion` — genuinely new content from translation (not actionable)
+
+**Usage:**
+```bash
+# Run standalone
+python3 scripts/roundtrip_tuner.py testdata/成果物4/source.pdf --lang-b ja --auto
+
+# Evaluate only (no fix loop)
+python3 scripts/roundtrip_eval.py testdata/成果物4/source.pdf --lang-b ja
+
+# Layout-only re-eval (fast, reuses cached translation)
+python3 scripts/roundtrip_eval.py testdata/成果物4/source.pdf --lang-b ja --layout-only
+```
+
+With Claude Code, use the `/tune` skill to run this automatically.
+
+---
+
 ## Project Structure
 
 ```
@@ -178,7 +224,9 @@ pdf_translator/
 │   └── development.md       # Development log
 │
 ├── scripts/
-│   └── verify.sh            # Quick pipeline + visual check helper
+│   ├── verify.sh            # Quick pipeline + visual check helper
+│   ├── roundtrip_eval.py    # Round-trip layout evaluation (A→B→A scoring)
+│   └── roundtrip_tuner.py   # Self-supervised layout tuning loop
 │
 └── testdata/                # gitignored — put source PDFs here
     └── <testcase>/
