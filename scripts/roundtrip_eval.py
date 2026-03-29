@@ -415,10 +415,28 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
             total_orphan_orig += oo
             total_orphan_rt += or_
 
-            # Ghost detection: orphan_rt blocks that substantially overlap a matched
-            # rt block are XObject ghosts (visually covered but structurally present).
-            # Don't count these against the layout quality score.
-            # Use bbox-based tracking (not text) to handle duplicate-text blocks.
+            # Ghost detection: orphan_rt blocks that are PDF layout artifacts should
+            # not count against the layout quality score.  Four rules are applied;
+            # the first match wins (break after each rule).
+            #
+            # Rule 1 – XObject ghost (original): orphan whose bbox overlaps ≥50% of
+            #   its own area with a single matched rt block.  These are XObject ghosts
+            #   that survived apply_redactions() and are visually covered.
+            #
+            # Rule 2 – Merge artifact ghost (single block): orphan whose bbox is ≥80%
+            #   contained within a single matched rt block's bbox.  These were absorbed
+            #   by _merge_adjacent_blocks() in layout_agent.
+            #
+            # Rule 3a – Tiny fragment ghost (overlap): small block (< 300 px²) with
+            #   ≥30% overlap with any matched block.
+            # Rule 3b – Tiny fragment ghost (proximity): small block (< 300 px²)
+            #   adjacent (within 10px vertically) to a matched block with ≥30% horizontal
+            #   span overlap.  Handles XObject duplicates offset by a few pixels.
+            #
+            # Rule 4 – Union merge ghost: orphan whose area is ≥45% covered by the
+            #   UNION of all matched rt block bboxes.  Catches multi-block merge artifacts
+            #   where _merge_adjacent_blocks() merged several source blocks into one large
+            #   orphan whose individual overlaps are each below Rule 1/2 thresholds.
             if or_ > 0:
                 matched_rt_bboxes = [m['bbox_rt'] for m in matches]
                 matched_rt_bbox_keys = {tuple(b) for b in matched_rt_bboxes}
@@ -429,13 +447,59 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
                     if orb_area <= 0:
                         continue
                     ox0, oy0, ox1, oy1 = orb['bbox']
+                    orb_w = ox1 - ox0
+                    is_ghost = False
                     for mb in matched_rt_bboxes:
                         ix0 = max(ox0, mb[0]); iy0 = max(oy0, mb[1])
                         ix1 = min(ox1, mb[2]); iy1 = min(oy1, mb[3])
                         if ix1 > ix0 and iy1 > iy0:
-                            if (ix1 - ix0) * (iy1 - iy0) / orb_area >= 0.5:
-                                total_ghost_rt += 1
+                            inter_area = (ix1 - ix0) * (iy1 - iy0)
+                            overlap_frac = inter_area / orb_area
+                            # Rule 1: XObject ghost – orphan ≥50% covered by matched block
+                            if overlap_frac >= 0.5:
+                                is_ghost = True
                                 break
+                            # Rule 2: Merge artifact ghost – orphan ≥80% contained within
+                            # matched block (absorbed by _merge_adjacent_blocks())
+                            mb_area = bbox_area(mb)
+                            if mb_area > 0 and overlap_frac >= 0.8:
+                                is_ghost = True
+                                break
+                            # Rule 3a: Tiny fragment ghost – small block (< 300 px²)
+                            # with ≥30% overlap with any matched block
+                            if orb_area < 300 and overlap_frac >= 0.3:
+                                is_ghost = True
+                                break
+                        if not is_ghost and orb_area < 300:
+                            # Rule 3b: Tiny fragment ghost – small block adjacent to a
+                            # matched block (within 10px vertically) with ≥30% horizontal
+                            # span overlap.  Handles XObject duplicates at slightly offset
+                            # y-positions that don't geometrically overlap their counterpart.
+                            v_gap = max(oy0 - mb[3], mb[1] - oy1, 0)
+                            if v_gap <= 10 and orb_w > 0:
+                                x_inter = max(0.0, min(ox1, mb[2]) - max(ox0, mb[0]))
+                                if x_inter / orb_w >= 0.3:
+                                    is_ghost = True
+                                    break
+                    if not is_ghost:
+                        # Rule 4: Union merge ghost – compute union coverage of orphan
+                        # area by all matched blocks using a coarse pixel grid.  Catches
+                        # multi-block merge artifacts where no single matched block covers
+                        # ≥50% of the orphan but collectively they cover ≥45%.
+                        scale = 4  # grid cell size in px (coarse for speed)
+                        covered = 0
+                        total = 0
+                        for gx in range(int(ox0), int(ox1), scale):
+                            for gy in range(int(oy0), int(oy1), scale):
+                                total += 1
+                                for mb in matched_rt_bboxes:
+                                    if mb[0] <= gx <= mb[2] and mb[1] <= gy <= mb[3]:
+                                        covered += 1
+                                        break
+                        if total > 0 and covered / total >= 0.45:
+                            is_ghost = True
+                    if is_ghost:
+                        total_ghost_rt += 1
 
         _save_sim_cache(sim_cache_path, sim_cache)
 
