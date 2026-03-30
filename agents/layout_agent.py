@@ -1065,12 +1065,14 @@ def render_page(
                     page.add_redact_annot(r)
                     white_cover_rects.append(r)
 
-    # Only preserve vector line art when the page has colored backgrounds that
-    # need to be maintained (bg_cover_rects).  On pure white-background pages
-    # LINE_ART_NONE would preserve slide-template Form XObject fills that render
-    # on top of our white covers, producing spurious colored rectangles.
+    # Only preserve vector line art when the page has *colored* (non-white)
+    # backgrounds to maintain (e.g. blue header bars).  On pure white-background
+    # pages, slide-template Form XObjects contain colored fills that survive
+    # LINE_ART_NONE and render above our white covers — producing spurious
+    # colored rectangles.  White bg_cover fills don't need line-art preservation.
+    _has_colored_bg = any(not all(c > 0.85 for c in fill) for _, fill in bg_cover_rects)
     _graphics_flag = (
-        fitz.PDF_REDACT_LINE_ART_NONE if bg_cover_rects
+        fitz.PDF_REDACT_LINE_ART_NONE if _has_colored_bg
         else fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED
     )
     page.apply_redactions(
