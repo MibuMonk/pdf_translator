@@ -626,25 +626,43 @@ def insert_text_fitting(
 # Page-level rendering
 # ---------------------------------------------------------------------------
 
+_COLOR_MERGE_THRESHOLD = 0.2  # max L2 color distance for adjacent-block merging
+
+
 def _merge_adjacent_blocks(
     translated_texts: list,
     bboxes: list,
     font_sizes: list,
+    colors: Optional[list] = None,
 ) -> tuple:
     """Merge adjacent blocks that are close enough vertically and share x-overlap.
 
     Also merges same-line (y-overlapping) blocks that are horizontally adjacent,
     which catches fragment orphans like single-word labels split from a larger block.
 
-    Returns new (translated_texts, bboxes, font_sizes).
+    ``colors`` (optional): per-block RGB color tuples.  When provided, two blocks
+    are only merged if their colors are similar (L2 distance ≤
+    _COLOR_MERGE_THRESHOLD).  This prevents semantically distinct blocks that
+    happen to be spatially close (e.g. a header and a body cell in a grid) from
+    being merged together, which would cause the merged block to inherit the wrong
+    color and corrupt downstream color round-trip accuracy.
+
+    Returns new (translated_texts, bboxes, font_sizes[, colors]).
+    Returns colors only when the caller passed colors in.
     """
     if not bboxes:
+        if colors is not None:
+            return translated_texts, bboxes, font_sizes, colors
         return translated_texts, bboxes, font_sizes
+
+    use_colors = colors is not None
+    cur_colors = list(colors) if use_colors else None
 
     merged = True
     while merged:
         merged = False
         new_texts, new_bboxes, new_sizes = [], [], []
+        new_colors = [] if use_colors else None
         used = [False] * len(bboxes)
 
         for i in range(len(bboxes)):
@@ -653,13 +671,16 @@ def _merge_adjacent_blocks(
             bi = bboxes[i]
             ti = translated_texts[i]
             si = font_sizes[i]
+            ci = cur_colors[i] if use_colors else None
             for j in range(i + 1, len(bboxes)):
                 if used[j]:
                     continue
                 bj = bboxes[j]
-                # Actual bounding-box separation (0 when overlapping or touching)
+                # Actual bounding-box separation (0 when overlapping or touching).
+                # Round to nearest pixel so that float bbox coords (e.g. 11.907)
+                # don't accidentally fall inside the 12 px merge window.
                 y_sep = max(0.0, max(bi.y0, bj.y0) - min(bi.y1, bj.y1))
-                if y_sep >= _Y_GAP_MERGE:
+                if round(y_sep) >= _Y_GAP_MERGE:
                     continue
                 # x overlap ratio relative to the narrower block
                 x_overlap = min(bi.x1, bj.x1) - max(bi.x0, bj.x0)
@@ -676,6 +697,13 @@ def _merge_adjacent_blocks(
                     or (same_line and x_sep < _Y_GAP_MERGE)
                 )
                 if passes_x:
+                    # Skip merge when the two blocks have different colors — they
+                    # are likely distinct semantic elements (e.g. header vs. cell).
+                    if use_colors:
+                        cj = cur_colors[j]
+                        dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(ci, cj)))
+                        if dist > _COLOR_MERGE_THRESHOLD:
+                            continue
                     # Merge j into i
                     ti = ti + "\n" + translated_texts[j]
                     bi = fitz.Rect(
@@ -690,12 +718,18 @@ def _merge_adjacent_blocks(
             new_texts.append(ti)
             new_bboxes.append(bi)
             new_sizes.append(si)
+            if use_colors:
+                new_colors.append(ci)
             used[i] = True
 
         translated_texts = new_texts
         bboxes = new_bboxes
         font_sizes = new_sizes
+        if use_colors:
+            cur_colors = new_colors
 
+    if use_colors:
+        return translated_texts, bboxes, font_sizes, cur_colors
     return translated_texts, bboxes, font_sizes
 
 
@@ -1063,8 +1097,8 @@ def render_page(
     # indices are based on the pre-merge layout.
     # ------------------------------------------------------------------
     _pre_merge_count = len(bboxes)
-    translated_texts, bboxes, source_sizes = _merge_adjacent_blocks(
-        translated_texts, bboxes, source_sizes
+    translated_texts, bboxes, source_sizes, source_colors = _merge_adjacent_blocks(
+        translated_texts, bboxes, source_sizes, colors=list(source_colors)
     )
     if len(bboxes) != _pre_merge_count:
         if plan_page is not None:
