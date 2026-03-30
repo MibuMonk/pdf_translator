@@ -115,6 +115,9 @@ def is_skip_text(text: str) -> bool:
     t = text.strip()
     if not t:
         return True
+    # Undecoded glyphs from Identity-H fonts — PyMuPDF returns U+FFFD
+    if t and all(c == '\ufffd' for c in t):
+        return True
     # 純数字（ページ番号）
     if _DIGITS_ONLY_RE.match(t):
         return True
