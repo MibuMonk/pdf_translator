@@ -1037,13 +1037,19 @@ def render_page(
             for rb in block.get("redact_bboxes", []):
                 r = fitz.Rect(rb)
                 bg_fill = _get_background_fill(r)
-                if bg_fill is not None and all(c > 0.85 for c in bg_fill) and _overlaps_image_obstacle(r):
+                bg_fill_was_white = bg_fill is not None and all(c > 0.85 for c in bg_fill)
+                if bg_fill_was_white and _overlaps_image_obstacle(r):
                     bg_fill = None  # white fill rect is under image layer — image is the real bg
                 if bg_fill is None and _overlaps_image_obstacle(r):
                     if all(c > 0.85 for c in block.get("color", [0, 0, 0])):
                         page.add_redact_annot(r, fill=None)  # white-on-image: erase text, no fill, image bg shows through
                         continue
-                    bg_fill = _sample_image_color(r)
+                    if bg_fill_was_white:
+                        # Vector background is white despite image obstacle — slide bg is white.
+                        # Don't sample image pixels (would average text color into bg).
+                        pass  # fall through to white_cover_rects below
+                    else:
+                        bg_fill = _sample_image_color(r)
                 if bg_fill is not None:
                     if _needs_redact:
                         page.add_redact_annot(r)
