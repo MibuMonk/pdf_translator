@@ -1057,11 +1057,17 @@ def render_page(
                         pass  # fall through to white_cover_rects below
                     else:
                         bg_fill = _sample_image_color(r)
-                if bg_fill is not None:
+                if bg_fill is not None and not all(c > 0.85 for c in bg_fill):
+                    # Real colored background (e.g. blue bar): paint with the
+                    # detected color. bg_cover_rects commits early so the fill
+                    # sits below translated text.
                     if _needs_redact:
                         page.add_redact_annot(r)
                     bg_cover_rects.append((r, bg_fill))
                 else:
+                    # White or no background: route to white_cover_rects which
+                    # commits AFTER XObject Do calls, covering any image/template
+                    # content that would otherwise bleed through.
                     page.add_redact_annot(r)
                     white_cover_rects.append(r)
 
