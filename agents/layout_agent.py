@@ -1073,7 +1073,7 @@ def render_page(
     _has_colored_bg = any(not all(c > 0.85 for c in fill) for _, fill in bg_cover_rects)
     _graphics_flag = (
         fitz.PDF_REDACT_LINE_ART_NONE if _has_colored_bg
-        else fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED
+        else fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED
     )
     page.apply_redactions(
         images=fitz.PDF_REDACT_IMAGE_NONE,
