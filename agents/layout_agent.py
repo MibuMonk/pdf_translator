@@ -1052,7 +1052,10 @@ def render_page(
                     page.add_redact_annot(r)
                     white_cover_rects.append(r)
 
-    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+    page.apply_redactions(
+        images=fitz.PDF_REDACT_IMAGE_NONE,
+        graphics=fitz.PDF_REDACT_LINE_ART_NONE,  # preserve vector fills (bg bars etc.)
+    )
 
     # Draw background-color covers after redaction (order matters: drawings
     # written here appear above the redacted layer but below inserted text)

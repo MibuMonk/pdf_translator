@@ -83,6 +83,45 @@ When text overflows the bbox, `page.insert_textbox()` silently truncates charact
 
 **Affected stage:** layout_agent (rendering — font fitting or textbox insertion).
 
+### L8: Background Erasure (背景擦除)
+
+**Symptom:** A colored background graphic (e.g., blue header bar, branded panel) is
+replaced by a white or grey rectangle in the output. Text that was white-on-color becomes
+invisible or loses its visual context. The background fill is gone; only the translated
+text floats on a plain white area.
+
+**Mechanism:** `page.add_redact_annot()` uses white fill by default, which physically
+removes ALL content within the rect — including underlying vector fills that formed the
+colored background. The translation pipeline clears the old text but inadvertently
+destroys the background graphic.
+
+**Affected stage:** layout_agent (redaction step). Fix direction: sample background color
+at each redact rect before applying, pass as `fill` parameter to `add_redact_annot()`.
+
+### L9: Background Color Bleed (背景色渗出)
+
+**Symptom:** A text block is rendered with a visible fill color (e.g. grey, light blue)
+that was not present in the source — the block appears to have a colored background box
+behind the translated text.
+
+**Mechanism:** The `source_colors` array is misaligned after `_merge_adjacent_blocks()`,
+causing a block to inherit another block's fill color. Or `bg_fill` detection incorrectly
+marks a block as having a background fill.
+
+**Affected stage:** layout_agent (color assignment / merge).
+
+### LF: Font Tofu (字形方块)
+
+**Symptom:** Translated text renders as sequences of ■■■■ boxes. The correct translated
+characters are passed to the renderer but the selected font lacks glyph coverage for
+those code points.
+
+**Mechanism:** Font auto-switcher fails to select a CJK-capable font for the block.
+Typically occurs on slides with unusual background colors or dark themes where the font
+probe path is not triggered.
+
+**Affected stage:** layout_agent (font selection / auto-switcher).
+
 ## Translation Defects
 
 ### T1: Missing Translation (未翻译)
