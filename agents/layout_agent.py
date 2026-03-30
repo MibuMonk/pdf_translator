@@ -974,6 +974,10 @@ def render_page(
                     if bg_fill is None and _overlaps_image_obstacle(r):
                         bg_fill = _sample_image_color(r)
                     if bg_fill is not None:
+                        # Physically remove text via redact_annot (fill=None avoids PDF color-
+                        # state contamination); bg_cover_rects (drawn via new_shape after
+                        # apply_redactions) re-paints the correct bg color and covers XObjects.
+                        page.add_redact_annot(r)
                         bg_cover_rects.append((r, bg_fill))
                     else:
                         page.add_redact_annot(r)
@@ -995,6 +999,9 @@ def render_page(
                         continue
                     bg_fill = _sample_image_color(r)
                 if bg_fill is not None:
+                    # Physically remove text (fill=None avoids color-state contamination);
+                    # bg_cover_rects covers the area with the correct bg color and XObjects.
+                    page.add_redact_annot(r)
                     bg_cover_rects.append((r, bg_fill))
                 else:
                     page.add_redact_annot(r)
