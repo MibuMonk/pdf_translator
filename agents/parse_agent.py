@@ -15,6 +15,8 @@ import sys
 from collections import Counter
 from typing import List, Optional, Tuple
 
+from shared_utils import has_cjk
+
 # ── 定数 ──────────────────────────────────────────────────────────────────────
 
 MIN_TRANSLATE_FONTSIZE = 6.0  # これ未満の font_size のブロックは翻訳対象外
@@ -448,6 +450,13 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
                 a_inter = inter.width * inter.height
                 min_a = min(ai, aj)
                 if min_a > 0 and a_inter / min_a > 0.70:
+                    # Bilingual exception: CJK vs non-CJK blocks at the same position
+                    # are translation pairs (e.g., XObject English + rendered Japanese),
+                    # not duplicates. Keep both. See rt_B.pdf bilingual pair case.
+                    text_i = insertion_items[ii]["text"]
+                    text_j = insertion_items[jj]["text"]
+                    if has_cjk(text_i) != has_cjk(text_j):
+                        continue  # keep both blocks
                     if ai <= aj:
                         keep[ii] = False
                     else:
