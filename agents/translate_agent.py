@@ -208,7 +208,11 @@ def _is_target_language(text: str, tgt: str) -> bool:
         return False
 
     if tgt == 'en':
-        # Predominantly Latin letters
+        # Predominantly Latin letters AND no CJK characters.
+        # Without the CJK guard, mixed strings like "計画（Planning）"
+        # would pass the >0.5 threshold and be incorrectly skipped.
+        if re.search(r'[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]', clean):
+            return False  # contains CJK/kana/hangul → not already English
         latin = len(re.findall(r'[a-zA-Z]', clean))
         total = len(re.findall(r'\S', clean))
         return total > 0 and latin / total > 0.5
@@ -894,6 +898,15 @@ def main():
                 context_text = (context_text + "\n\n" + reg_note).strip() if context_text else reg_note
     print()
 
+    # Pre-filter: skip blocks already in the target language (e.g. English XObject
+    # template text in a ja→en roundtrip pass).  Mirror the ja→zh carve-out used
+    # inside translate_texts() — Japanese kanji is CJK but is NOT Chinese.
+    _skip_if_target = (
+        (lambda t: False)
+        if (args.src == 'ja' and args.tgt.startswith('zh'))
+        else (lambda t: _is_target_language(t, args.tgt))
+    )
+
     # Process page by page
     for page_idx, page in enumerate(pages):
         blocks = page.get("blocks", [])
@@ -902,15 +915,26 @@ def main():
 
         page_num = page.get("page", page_idx + 1)
 
-        # Separate blocks into plain (no multi-color spans) and span-aware
+        # Separate blocks into plain (no multi-color spans) and span-aware.
+        # Blocks already in the target language are short-circuited here:
+        # translated = "" signals layout_agent to skip rendering (white cover
+        # rect is still drawn in Step 1, so XObject text is properly covered).
         plain_indices = []
         span_indices = []
+        skipped_target = 0
         for i, block in enumerate(blocks):
+            text = block.get("text", "").strip()
+            if text and _skip_if_target(text):
+                block["translated"] = ""  # already target language; skip LLM + rendering
+                skipped_target += 1
+                continue
             cs = block.get("color_spans", [])
             if len(cs) > 1:
                 span_indices.append(i)
             else:
                 plain_indices.append(i)
+        if skipped_target:
+            print(f"  [Page {page_num}] skipped {skipped_target} already-target-language blocks", flush=True)
 
         # --- Translate plain blocks (original batch flow) ---
         # Clean layout-wrapping newlines before translation (L1 fix)
