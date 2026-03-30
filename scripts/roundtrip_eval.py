@@ -59,8 +59,12 @@ def extract_blocks(pdf_path, filter_covered=False):
         opaque_rects = []
         if filter_covered:
             for d in page.get_drawings():
-                if d.get("fill") is not None and d.get("rect") is not None:
-                    opaque_rects.append(fitz.Rect(d["rect"]))
+                fill = d.get("fill")
+                # Only white/light fills are layout_agent cover rects.
+                # Dark fills are slide backgrounds — must NOT be treated as covers.
+                if fill is not None and d.get("rect") is not None:
+                    if all(c >= 0.7 for c in fill[:3]):
+                        opaque_rects.append(fitz.Rect(d["rect"]))
 
         def _is_covered(bbox, threshold=0.80):
             """Return True if >= threshold fraction of bbox area is covered by opaque rects."""
@@ -617,7 +621,11 @@ def run_eval(pdf_path, lang_a, lang_b, work_dir, alpha=0.4, beta=0.6, force=Fals
     # Step 3 \u2014 Extract blocks
     print('[Step 3] Extracting blocks ...')
     orig_blocks = extract_blocks(pdf_path)
-    rt_blocks = extract_blocks(rt_a_pdf, filter_covered=True)
+    # Don't use filter_covered for rt_A: layered translation accumulates cover
+    # rects from both the A→B and B→A passes, which coincide with rendered text
+    # positions and would falsely filter all translated blocks. XObject ghosts
+    # in rt_A are handled downstream by the ghost detection rules.
+    rt_blocks = extract_blocks(rt_a_pdf, filter_covered=False)
 
     # Step 4 \u2014 Load / init text similarity cache
     sim_cache_path = work_dir / 'text_sim_cache.json'

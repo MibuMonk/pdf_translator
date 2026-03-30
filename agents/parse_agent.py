@@ -141,37 +141,14 @@ def is_watermark_block(block: dict) -> bool:
     return False
 
 
-def _has_cjk(text: str) -> bool:
-    """Return True if text contains any CJK character."""
-    for ch in text:
-        cp = ord(ch)
-        if (0x3000 <= cp <= 0x9FFF) or (0xF900 <= cp <= 0xFAFF) or (0x20000 <= cp <= 0x2A6DF):
-            return True
-    return False
-
-
-def is_hidden_by_drawing(block_bbox_tuple: tuple, drawings: list, page_area: float,
-                         block_text: str = "") -> bool:
+def is_hidden_by_drawing(block_bbox_tuple: tuple, drawings: list, page_area: float) -> bool:
     """
     ブロックの bbox が暗色の塗り潰し矩形に完全に覆われているか判定する。
 
     除外条件（= 隠しとみなさない）:
     - fill が白/薄色 (全成分 > 0.85)
     - 矩形がページ面積の 30% 超（スライド背景）
-    - block_text が 3 文字超（実質的な内容を持つブロックは隠しとみなさない）
-    - block_text に CJK 文字が含まれる（翻訳後テキストは pipeline artifact の描画より優先）
-
-    The last two conditions prevent false positives when white cover rects drawn
-    by layout_agent (to mask XObject English text) spatially overlap newly
-    rendered translated text at the same position.
     """
-    # If the block already has substantive translatable content, don't treat it
-    # as hidden regardless of what drawings are present.  This guards against
-    # pipeline artifacts (white/bg cover rects written to the content stream to
-    # erase XObject text) that coincidentally overlap freshly inserted text.
-    if block_text and (len(block_text.strip()) > 3 or _has_cjk(block_text)):
-        return False
-
     bx0, by0, bx1, by1 = block_bbox_tuple
     for d in drawings:
         fill = d.get("fill")
@@ -323,18 +300,16 @@ def parse_page(page: fitz.Page, page_num: int) -> dict:
 
         block_bbox_tuple = block["bbox"]  # (x0, y0, x1, y1)
 
+        # 隠しブロック（暗色矩形に完全に覆われている）
+        page_area = page_rect.width * page_rect.height
+        if is_hidden_by_drawing(block_bbox_tuple, drawings, page_area):
+            continue
+
         # テキスト結合（bullet-only 行のマージを含む）
         lines_text = []
         for line in block["lines"]:
             line_text = "".join(_normalize_span_text(s) for s in line["spans"])
             lines_text.append(line_text)
-
-        # 隠しブロック（暗色矩形に完全に覆われている）
-        # テキストを先に取得し、実質的な内容があれば隠しとみなさない
-        _raw_block_text = "".join(lines_text).strip()
-        page_area = page_rect.width * page_rect.height
-        if is_hidden_by_drawing(block_bbox_tuple, drawings, page_area, _raw_block_text):
-            continue
 
         # bullet-only 行と次行を結合
         i = 0
