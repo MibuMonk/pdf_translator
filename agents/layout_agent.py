@@ -960,7 +960,18 @@ def render_page(
     white_cover_rects: list[fitz.Rect] = []  # rects that used add_redact_annot (non-fill=None)
 
     _union_rects_added: set[tuple] = set()
+    # Determine whether this page's blocks require physical text removal.
+    # Physical removal (add_redact_annot) is needed when translated text differs
+    # from source text — the old text must be erased before inserting the new.
+    # For identity passes (translated == text), skip removal to preserve the
+    # original PDF's embedded font metrics (re-rendering introduces differences).
+    _text_changed = {
+        i: block.get("translated", "").strip() != block.get("text", "").strip()
+        for i, block in enumerate(blocks)
+    }
+
     for blk_idx, block in enumerate(blocks):
+        _needs_redact = _text_changed.get(blk_idx, True)
         if blk_idx in _group_union_bbox:
             union_r = _group_union_bbox[blk_idx]
             key = (union_r.x0, union_r.y0, union_r.x1, union_r.y1)
@@ -974,10 +985,11 @@ def render_page(
                     if bg_fill is None and _overlaps_image_obstacle(r):
                         bg_fill = _sample_image_color(r)
                     if bg_fill is not None:
-                        # Physically remove text via redact_annot (fill=None avoids PDF color-
-                        # state contamination); bg_cover_rects (drawn via new_shape after
-                        # apply_redactions) re-paints the correct bg color and covers XObjects.
-                        page.add_redact_annot(r)
+                        # Only physically remove text when the content actually changes.
+                        # Skipping redaction for identity passes preserves embedded font
+                        # metrics and avoids spurious line-overflow regressions.
+                        if _needs_redact:
+                            page.add_redact_annot(r)
                         bg_cover_rects.append((r, bg_fill))
                     else:
                         page.add_redact_annot(r)
@@ -999,9 +1011,8 @@ def render_page(
                         continue
                     bg_fill = _sample_image_color(r)
                 if bg_fill is not None:
-                    # Physically remove text (fill=None avoids color-state contamination);
-                    # bg_cover_rects covers the area with the correct bg color and XObjects.
-                    page.add_redact_annot(r)
+                    if _needs_redact:
+                        page.add_redact_annot(r)
                     bg_cover_rects.append((r, bg_fill))
                 else:
                     page.add_redact_annot(r)
